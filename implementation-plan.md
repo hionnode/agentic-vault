@@ -172,6 +172,18 @@ Instance profile with a role carrying two inline policies:
 }
 ```
 
+> **Hardening note:** The `kms:ViaService` condition alone allows any EC2 instance in the region to use this key. Pin to the Vault instance's IAM role ARN by adding:
+> ```json
+> "StringEquals": {
+>   "kms:CallerAccount": "<account-id>",
+>   "kms:ViaService": "ec2.ap-south-1.amazonaws.com"
+> },
+> "ArnEquals": {
+>   "aws:PrincipalArn": "arn:aws:iam::<account-id>:role/vault-instance-role"
+> }
+> ```
+> After the Vault EC2 instance is created, further tighten by adding the instance ID as a condition.
+
 **S3 backup policy:**
 ```json
 {
@@ -189,6 +201,46 @@ Instance profile with a role carrying two inline policies:
 
 No other permissions. No `s3:DeleteObject` on the backup bucket from the instance role — backups are append-only from the instance's perspective.
 
+**Bucket policy (explicit deny for unauthorized access):**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyDeleteFromAll",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["s3:DeleteObject", "s3:DeleteBucket", "s3:PutBucketPolicy"],
+      "Resource": [
+        "arn:aws:s3:::vault-raft-backups-<account-id>",
+        "arn:aws:s3:::vault-raft-backups-<account-id>/*"
+      ]
+    },
+    {
+      "Sid": "DenyUnauthorizedAccess",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::vault-raft-backups-<account-id>",
+        "arn:aws:s3:::vault-raft-backups-<account-id>/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::<account-id>:role/vault-instance-role",
+            "arn:aws:iam::<account-id>:user/admin"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+Enable MFA Delete on the bucket for additional protection against backup tampering.
+
 ### 1.5 Networking (`networking.tf`)
 
 - Use default VPC or a dedicated VPC — keep it simple
@@ -202,6 +254,9 @@ No other permissions. No `s3:DeleteObject` on the backup bucket from the instanc
 
 - AMI: latest Ubuntu 24.04 LTS arm64 (use `aws_ami` data source)
 - Instance type: `t4g.micro`
+
+> **Sizing consideration:** t4g.micro (1 vCPU, 1GB RAM) is marginal for Vault + Raft + audit logging under load. If burst credits deplete, CPU throttles to 5% baseline, causing latency spikes. Consider t4g.small (2 vCPU, 2GB RAM, ~$13/mo) for stability. Add a CloudWatch alarm for `CPUCreditBalance < 20` to detect credit exhaustion before it impacts agents.
+
 - EBS: 30GB gp3, encrypted with default EBS encryption key
 - IMDSv2 enforced: `http_tokens = "required"` — non-negotiable
 - `user_data`: points to `scripts/user-data.sh`
@@ -236,6 +291,15 @@ The script runs on first boot and does the following in order:
    - Add HashiCorp GPG key and apt repo
    - `apt install vault` (gets the arm64 binary)
    - Alternatively, download the specific version binary from releases.hashicorp.com for version pinning
+
+> **Version pinning:** Do not use `apt install vault` in production — it pulls the latest version non-deterministically. Pin the version:
+> ```bash
+> VAULT_VERSION="1.15.0"  # Pin in Terraform variable
+> curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_arm64.zip" \
+>   -o /tmp/vault.zip
+> unzip /tmp/vault.zip -d /usr/local/bin
+> chmod 755 /usr/local/bin/vault
+> ```
 3. Install Tailscale:
    - Add Tailscale apt repo
    - `apt install tailscale`
@@ -369,6 +433,31 @@ vault audit enable file file_path=/var/log/vault/audit.log
 ```
 
 Every secret access, authentication, and policy check is now logged with accessor identity, timestamp, and request details. Ship this to SigNoz via the OpenTelemetry collector or CloudWatch agent.
+
+### Audit Log Management
+
+**Log rotation (add to instance provisioning):**
+
+```
+# /etc/logrotate.d/vault
+/var/log/vault/audit.log {
+    daily
+    rotate 30
+    compress
+    missingok
+    notifempty
+    copytruncate
+    postrotate
+        systemctl reload vault >/dev/null 2>&1 || true
+    endscript
+}
+```
+
+**Log shipping (mandatory, not optional):**
+
+Ship audit logs to S3 for immutable retention. Use the CloudWatch agent to forward logs, then configure a CloudWatch Logs subscription to push to S3 with Object Lock (governance mode, 90-day retention). This ensures audit logs cannot be deleted even if the EC2 instance is compromised.
+
+**Retention policy:** 30 days on local disk (logrotate), 90 days in S3 (Object Lock), indefinite in log aggregator (SigNoz/CloudWatch) for querying.
 
 ### 4.2 KV Hierarchy Design
 
@@ -517,6 +606,8 @@ vault write auth/kubernetes-homelab/role/n8n-workflow \
   policies="homelab-n8n" \
   ttl=1h
 ```
+
+> **Networking requirement:** Vault must be able to reach the Kubernetes API server to validate service account tokens. For EKS: the Vault EC2 instance must be in the same VPC (or have VPC peering) with security group rules allowing HTTPS to the EKS API endpoint. For homelab Talos cluster on Tailscale: the Talos API server must be reachable via MagicDNS from the Vault EC2 instance. Verify connectivity: `curl -k https://<k8s-api-endpoint>/healthz` from the Vault host.
 
 **AWS IAM Auth** — for ECS tasks and Lambda functions:
 
@@ -911,6 +1002,36 @@ onboard-project.sh <path-to-manifest>
 #   Generate secret_ids: vault write -f auth/approle/role/gha-clientA-platform-staging/secret-id
 ```
 
+**Manifest validation (run before onboarding):**
+
+```bash
+# validate-manifest.sh — catches privilege creep before policy creation
+set -euo pipefail
+MANIFEST="$1"
+
+# No prod paths in staging consumers
+if yq '.secrets[] | select(.environments[] == "staging") | select(.consumers[] | test("prod"))' "$MANIFEST" | grep -q .; then
+  echo "ERROR: Staging secrets cannot have prod consumers" >&2; exit 1
+fi
+
+# No wildcards in secret names
+if yq '.secrets[].name' "$MANIFEST" | grep -q '\*'; then
+  echo "ERROR: Wildcard secret names are not allowed" >&2; exit 1
+fi
+
+# Valid consumer types only
+VALID_CONSUMERS="dev gha-deploy eks-app ecs-task"
+for consumer in $(yq '.secrets[].consumers[]' "$MANIFEST"); do
+  if ! echo "$VALID_CONSUMERS" | grep -qw "$consumer"; then
+    echo "ERROR: Unknown consumer type: $consumer" >&2; exit 1
+  fi
+done
+
+echo "Manifest validation passed"
+```
+
+Add `--dry-run` flag to `onboard-project.sh` that shows what policies and AppRoles will be created without committing them to Vault.
+
 **Validation (drift detection):**
 
 ```bash
@@ -1034,6 +1155,44 @@ If you haven't tested your restore, you don't have backups.
 - AWS dynamic secrets: no rotation needed — they're ephemeral by design
 - Vault's own credentials (the IAM user for the AWS secrets engine): rotate every 90 days
 
+### Automated Secret-ID Rotation
+
+**systemd timer for daily rotation (on dev machine or CI host):**
+
+```ini
+# /etc/systemd/system/vault-secret-id-rotate.timer
+[Unit]
+Description=Rotate Vault AppRole secret_id daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```ini
+# /etc/systemd/system/vault-secret-id-rotate.service
+[Unit]
+Description=Rotate Vault AppRole secret_id
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rotate-secret-id.sh
+```
+
+```bash
+#!/bin/bash
+# rotate-secret-id.sh
+set -euo pipefail
+NEW_SECRET_ID=$(vault write -f -field=secret_id auth/approle/role/claude-code-agent/secret-id)
+echo "$NEW_SECRET_ID" > /etc/vault.d/secret-id
+chmod 0600 /etc/vault.d/secret-id
+```
+
+**GitHub Actions constraint:** GHA secrets are static — you cannot automate secret_id rotation for GHA-stored credentials. Mitigate by using very short token TTLs (15-30 min) for CI AppRoles, or move to self-hosted runners with Kubernetes auth (which avoids secret_id entirely).
+
 ### 6.3 Monitoring Checklist
 
 - CloudWatch: instance health, CPU, disk (set alarm at 80% EBS usage)
@@ -1054,6 +1213,20 @@ If you haven't tested your restore, you don't have backups.
 | **Total** | **~$10.50/month** |
 
 After free tier expires. During free tier: ~$2-3/month (KMS + minor S3).
+
+**Revised estimate (realistic):**
+
+| Component | Monthly Cost |
+|---|---|
+| EC2 t4g.micro (or t4g.small) | $6-13 |
+| EBS 30GB gp3 | $2.40 |
+| KMS (2 keys + request charges) | $2.50-3.00 |
+| S3 (backups, <1GB) | $0.05 |
+| CloudWatch (audit log shipping) | $0.50-2.00 |
+| Data transfer (Tailscale) | $0.50-1.00 |
+| **Total** | **$12-22/mo** |
+
+The original ~$7/mo estimate omits KMS request charges, CloudWatch log ingestion, and data transfer costs. Budget $15/mo for t4g.micro, $22/mo for t4g.small.
 
 ---
 
@@ -1364,6 +1537,37 @@ gate_request() {
 }
 ```
 
+**Approval backend (simplest: S3 polling):**
+
+```bash
+wait_for_approval() {
+  local session_id="$1"
+  local timeout=300  # 5 minutes
+  local interval=5
+  local elapsed=0
+
+  # Create approval request
+  echo '{"status":"pending","session":"'$session_id'","requested_at":"'$(date -u +%FT%TZ)'"}' \
+    | aws s3 cp - "s3://vault-approvals/${session_id}.json"
+
+  echo "Approval required. Waiting up to ${timeout}s..." >&2
+
+  while [ $elapsed -lt $timeout ]; do
+    status=$(aws s3 cp "s3://vault-approvals/${session_id}.json" - 2>/dev/null | jq -r '.status')
+    case "$status" in
+      approved) return 0 ;;
+      denied)   echo "Request denied" >&2; return 1 ;;
+      *)        sleep $interval; elapsed=$((elapsed + interval)) ;;
+    esac
+  done
+
+  echo "Approval timed out after ${timeout}s" >&2
+  return 1
+}
+```
+
+To approve: `echo '{"status":"approved"}' | aws s3 cp - "s3://vault-approvals/${SESSION_ID}.json"`
+
 This ties into your React Native remote control for long-running agents — the agent requests prod creds, your phone buzzes, you approve or deny. Low-risk requests (staging KV reads) flow through instantly.
 
 ### 7.7 Sub-Agent Credential Isolation
@@ -1525,7 +1729,7 @@ The MCP server is a lightweight process (TypeScript/Node or Python) that:
 - Implements the MCP protocol (stdio transport for Claude Code, SSE for remote)
 - Maintains a session context: client, environment, task, allowed paths
 - Delegates all Vault API calls through the local vault-agent proxy
-- Tracks leases in memory for session cleanup
+- Tracks leases in memory for session cleanup (see Lease Lifecycle below)
 - Enforces the risk-gating logic from 7.6 before returning high-risk credentials
 
 **Session initialization:**
@@ -1544,6 +1748,44 @@ When Claude Code or another MCP client connects, the server reads session contex
 ```
 
 The MCP server uses this to filter and validate every tool call before it reaches Vault. The agent can call `list_available_secrets` to discover what's accessible and `get_aws_credentials` to get scoped creds — but only within the boundaries the harness defined for this session.
+
+### Lease Lifecycle in MCP Server
+
+**Data structure:**
+
+```typescript
+interface TrackedLease {
+  leaseId: string;
+  path: string;        // e.g., "aws/creds/agent-deploy"
+  ttlSeconds: number;
+  createdAt: Date;
+}
+
+// In-memory lease tracker
+const activeLeases = new Map<string, TrackedLease>();
+const MAX_LEASES_PER_SESSION = 50;  // Circuit breaker
+```
+
+**Cleanup signal:** The MCP server registers a SIGTERM handler. When Claude Code exits (normally or via ctrl-c), the parent process sends SIGTERM, triggering lease revocation:
+
+```typescript
+process.on('SIGTERM', async () => {
+  for (const [id, lease] of activeLeases) {
+    try {
+      await vaultClient.revokeLease(lease.leaseId);
+    } catch (e) {
+      // Log failed revocations for manual cleanup
+      console.error(`Failed to revoke lease ${lease.leaseId}: ${e.message}`);
+      fs.appendFileSync('/tmp/vault-orphaned-leases.log', `${lease.leaseId}\n`);
+    }
+  }
+  process.exit(0);
+});
+```
+
+**Circuit breaker:** If `activeLeases.size >= MAX_LEASES_PER_SESSION`, refuse new credential requests. This prevents memory leaks from runaway agents.
+
+**Crash recovery:** On startup, the MCP server checks `/tmp/vault-orphaned-leases.log` and attempts to revoke any orphaned leases from previous crashed sessions.
 
 ### 8.4 Why MCP Over Wrapper Scripts
 
@@ -1608,6 +1850,25 @@ Claude Code now has `read_secret`, `get_aws_credentials`, `list_available_secret
 The Vault MCP server is a Phase 8 deliverable — build it after Phases 1-6 are stable and vault-agent (Phase 7) is running. The wrapper scripts from agents.md remain the Phase 4 "simple mode" and continue to work. MCP is the upgrade path.
 
 This is also a strong open-source project for the agency — a generic Vault MCP server is something the agentic coding community doesn't have yet.
+
+---
+
+## Phase 9: High Availability (Future)
+
+Single-node Vault is appropriate for dev/POC but introduces a single point of failure. For agency work with SLA requirements:
+
+**Option A: Multi-node Raft cluster**
+- 3 Vault nodes in an Auto Scaling Group behind a Network Load Balancer
+- Raft consensus handles leader election automatically
+- Cost: ~$25-35/mo (3x t4g.micro)
+
+**Option B: Active-standby with cross-region snapshots**
+- Primary node in ap-south-1, S3 cross-region replication to a secondary region
+- Manual failover: launch new instance from latest snapshot in secondary region
+- Cost: ~$15/mo (primary + S3 replication)
+- RTO: 10-15 minutes (manual)
+
+**Current constraint:** Phase 1-6 is scoped as dev/POC. The 15-20 minute RTO is acceptable for supervised local development. Upgrade to HA before running unattended multi-client agent workflows with uptime requirements.
 
 ---
 
