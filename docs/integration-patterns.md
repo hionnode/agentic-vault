@@ -550,7 +550,7 @@ ESO syncs Vault secrets to native Kubernetes Secrets. The app uses K8s Secrets a
 
 ```yaml
 # external-secret.yaml
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: clientA-app-secrets
@@ -572,7 +572,7 @@ spec:
         key: projects/clientA-platform/staging/redis-url
         property: value
 ---
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: vault-backend

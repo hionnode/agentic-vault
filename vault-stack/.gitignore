@@ -1,0 +1,24 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.lock.hcl
+
+# Sensitive values
+terraform.tfvars
+*.auto.tfvars
+*.pem
+*.key
+
+# Generated policies
+policies/generated/
+
+# OS
+.DS_Store
