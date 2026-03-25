@@ -4,7 +4,9 @@
 
 A single-node HashiCorp Vault deployment on AWS EC2, accessed exclusively over Tailscale, with KMS auto-unseal and S3-backed Raft snapshots. Designed as a centralised secrets manager for agentic coding workflows, homelab infrastructure, and cloud workloads.
 
-**Target cost:** ~$7/month (EC2 t4g.micro + negligible KMS/S3 costs)
+**Target cost:** ~$20/month minimal, ~$41/month with full monitoring (see Phase 6.4)
+
+> **Licensing note:** HashiCorp Vault moved to the Business Source License (BSL 1.1) in August 2023. Vault remains free to use but is no longer open-source. For OSS-only requirements, consider [OpenBao](https://openbao.org), the community-maintained fork. All patterns in this document apply to both Vault and OpenBao.
 
 ---
 
@@ -52,7 +54,7 @@ vault-stack/
 │   ├── variables.tf
 │   ├── outputs.tf
 │   ├── providers.tf         # AWS provider, ap-south-1
-│   ├── backend.tf           # Remote state config (S3 + DynamoDB)
+│   ├── backend.tf           # Remote state config (S3 native locking)
 │   └── terraform.tfvars     # gitignored
 ├── scripts/
 │   ├── user-data.sh         # Cloud-init: install Vault + Tailscale, start services
@@ -127,10 +129,164 @@ vault-stack/
 Before anything else, create the state backend. This is a bootstrap step done manually or with a minimal separate Terraform config.
 
 - S3 bucket for state: `vault-infra-tfstate-<account-id>`
-- DynamoDB table for locking: `vault-infra-tfstate-lock`
+- State locking: S3 native locking (Terraform 1.10+, `use_lockfile = true`). No DynamoDB table needed.
 - Bucket policy: restrict to admin IAM role only
-- Encryption: SSE-S3 or SSE-KMS
+- Encryption: SSE-KMS with customer-managed key (state contains sensitive values)
 - Versioning: enabled
+
+> S3 encrypts all new objects with SSE-S3 by default (since January 2023). Customer-managed KMS keys add key rotation control and CloudTrail audit of key usage.
+
+> **Provider requirements:** `hashicorp/aws ~> 5.0`, `hashicorp/random ~> 3.0`. Terraform `>= 1.10` (required for S3 native state locking).
+
+**Complete `bootstrap/state.tf` (run once, manually):**
+
+```hcl
+# bootstrap/state.tf — creates the S3 bucket for Terraform state
+# Run this standalone before the main Terraform config.
+# After apply, configure the main backend to point here.
+
+terraform {
+  required_version = ">= 1.10"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "ap-south-1"
+}
+
+data "aws_caller_identity" "current" {}
+
+# KMS key for state encryption
+resource "aws_kms_key" "terraform_state" {
+  description             = "Terraform state encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Purpose   = "terraform-state-encryption"
+    ManagedBy = "terraform-bootstrap"
+  }
+}
+
+resource "aws_kms_alias" "terraform_state" {
+  name          = "alias/terraform-state"
+  target_key_id = aws_kms_key.terraform_state.id
+}
+
+# State bucket
+resource "aws_s3_bucket" "terraform_state" {
+  bucket = "vault-infra-tfstate-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Purpose   = "terraform-state"
+    ManagedBy = "terraform-bootstrap"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.terraform_state.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Bucket policy: deny unencrypted uploads and deny delete
+resource "aws_s3_bucket_policy" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyUnencryptedUploads"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.terraform_state.arn}/*"
+        Condition = {
+          StringNotEquals = {
+            "s3:x-amz-server-side-encryption" = "aws:kms"
+          }
+        }
+      },
+      {
+        Sid       = "DenyDeleteOperations"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+          "s3:DeleteBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.terraform_state.arn,
+          "${aws_s3_bucket.terraform_state.arn}/*"
+        ]
+      },
+      {
+        Sid       = "RestrictToAdminRole"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.terraform_state.arn,
+          "${aws_s3_bucket.terraform_state.arn}/*"
+        ]
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalArn" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/admin"
+          }
+        }
+      }
+    ]
+  })
+}
+```
+
+**Main project `backend.tf`** (configured after bootstrap):
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket       = "vault-infra-tfstate-<account-id>"
+    key          = "vault/terraform.tfstate"
+    region       = "ap-south-1"
+    encrypt      = true
+    kms_key_id   = "alias/terraform-state"
+    use_lockfile = true  # S3 native locking (Terraform 1.10+), no DynamoDB needed
+  }
+}
+```
+
+> **State file sensitivity:** Terraform state contains resource attributes in plaintext, including KMS key ARNs, IAM role ARNs, security group IDs, and any values passed through `user_data`. Treat the state bucket with the same security posture as the Vault instance itself. The KMS encryption + bucket policy + versioning combination ensures state is encrypted at rest, access-controlled, and recoverable from accidental overwrites.
 
 ### 1.2 KMS Key (`kms.tf`)
 
@@ -143,6 +299,88 @@ Before anything else, create the state backend. This is a bootstrap step done ma
 - Tag: `Purpose: vault-auto-unseal`
 - Create a separate KMS key for S3 backup encryption (not the same key as unseal — separation of concerns)
 
+**Key policy vs IAM policy — where to put conditions:**
+
+KMS has two layers of access control: the **key policy** (attached to the key itself) and **IAM policies** (attached to users/roles). Both must allow an action for it to succeed. This means you can split concerns:
+
+```hcl
+# Key policy: controls WHO can use the key and via WHICH service
+resource "aws_kms_key" "vault_unseal" {
+  description             = "Vault auto-unseal key"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowKeyAdministration"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowVaultUnseal"
+        Effect = "Allow"
+        Principal = {
+          AWS = aws_iam_role.vault_instance.arn
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ec2.ap-south-1.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Purpose   = "vault-auto-unseal"
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_kms_alias" "vault_unseal" {
+  name          = "alias/vault-unseal"
+  target_key_id = aws_kms_key.vault_unseal.id
+}
+```
+
+```hcl
+# IAM policy on the instance role: grants the actions WITHOUT duplicating conditions
+# The key policy's kms:ViaService condition already restricts to EC2 context
+resource "aws_iam_role_policy" "vault_kms" {
+  name = "vault-kms-unseal"
+  role = aws_iam_role.vault_instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ]
+        Resource = aws_kms_key.vault_unseal.arn
+      }
+    ]
+  })
+}
+```
+
+> **Why split?** The key policy is the source of truth for "who can use this key under what conditions." The IAM policy is the source of truth for "what this role can do." Don't duplicate `kms:ViaService` in both — it creates maintenance burden and confusion about which layer is enforcing what. Put service-scoping conditions on the key policy, put resource-scoping (which key ARN) on the IAM policy.
+
 ### 1.3 S3 Backup Bucket (`s3.tf`)
 
 - Bucket name: `vault-raft-backups-<account-id>`
@@ -153,6 +391,100 @@ Before anything else, create the state backend. This is a bootstrap step done ma
 - Lifecycle policy: transition to IA after 30 days, expire after 90 days
 - Bucket policy: explicit deny for all principals except instance role (read/write) and admin role (read-only)
 - No replication needed — single-region backups are acceptable for this scale
+
+**Complete `s3.tf`:**
+
+```hcl
+# Dedicated KMS key for backup encryption (separate from unseal key)
+resource "aws_kms_key" "vault_backup" {
+  description             = "Vault Raft backup encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Purpose   = "vault-backup-encryption"
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_kms_alias" "vault_backup" {
+  name          = "alias/vault-backup"
+  target_key_id = aws_kms_key.vault_backup.id
+}
+
+# Backup bucket
+resource "aws_s3_bucket" "vault_backups" {
+  bucket = "vault-raft-backups-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Purpose   = "vault-raft-backups"
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "vault_backups" {
+  bucket = aws_s3_bucket.vault_backups.id
+
+  versioning_configuration {
+    status     = "Enabled"
+    mfa_delete = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "vault_backups" {
+  bucket = aws_s3_bucket.vault_backups.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.vault_backup.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "vault_backups" {
+  bucket = aws_s3_bucket.vault_backups.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "vault_backups" {
+  bucket = aws_s3_bucket.vault_backups.id
+
+  rule {
+    id     = "backup-lifecycle"
+    status = "Enabled"
+
+    filter {
+      prefix = "snapshots/"
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 60
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+```
+
+> **Lifecycle tiers:** Snapshots stay in Standard for 30 days (fast restore), move to IA at 30 days (cheaper, still quick access), Glacier at 60 days (disaster recovery only), and expire at 90 days. Noncurrent versions (from versioning) expire after 30 days to prevent unbounded storage growth.
 
 ### 1.4 IAM (`iam.tf`)
 
@@ -198,6 +530,8 @@ Instance profile with a role carrying two inline policies:
 
 **SSM policy** (for Session Manager access):
 - Attach `AmazonSSMManagedInstanceCore` managed policy
+
+> **Alternative:** Tailscale SSH (GA since 2024) provides identity-based SSH access without IAM/SSM — Tailscale handles authentication, authorization, and audit logging. Consider this for simpler access management. SSM remains useful for MFA enforcement and session recording to S3.
 
 No other permissions. No `s3:DeleteObject` on the backup bucket from the instance role — backups are append-only from the instance's perspective.
 
@@ -250,6 +584,109 @@ Enable MFA Delete on the bucket for additional protection against backup tamperi
 - No elastic IP needed — Tailscale provides stable addressing via MagicDNS
 - EC2 instance in a private subnet if you have a NAT gateway, otherwise public subnet is fine since the SG has no inbound rules
 
+**Security group resource:**
+
+```hcl
+resource "aws_security_group" "vault" {
+  name        = "vault-instance"
+  description = "Vault EC2 — no inbound, scoped outbound"
+  vpc_id      = var.vpc_id
+
+  # No ingress rules — Vault is accessed exclusively via Tailscale
+  # Tailscale establishes outbound connections and receives replies via stateful tracking
+
+  # HTTPS — AWS API calls (KMS, S3, SSM, STS, CloudWatch), Tailscale coordination
+  egress {
+    description = "HTTPS to AWS APIs and Tailscale coordination"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTP — package manager updates (apt), HashiCorp releases
+  egress {
+    description = "HTTP for package updates"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # DNS (UDP) — required for all name resolution
+  egress {
+    description = "DNS UDP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # DNS (TCP) — fallback for large DNS responses
+  egress {
+    description = "DNS TCP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # NTP — time synchronization (critical for TLS, Vault leases, AWS SigV4)
+  egress {
+    description = "NTP"
+    from_port   = 123
+    to_port     = 123
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Tailscale WireGuard — direct peer connections
+  egress {
+    description = "Tailscale WireGuard"
+    from_port   = 41641
+    to_port     = 41641
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Tailscale STUN — NAT traversal for direct connections
+  egress {
+    description = "Tailscale STUN"
+    from_port   = 3478
+    to_port     = 3478
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name      = "vault-instance"
+    ManagedBy = "terraform"
+  }
+}
+```
+
+> **No inbound rules at all.** Tailscale works by establishing outbound WireGuard connections to the coordination server and peers. Return traffic flows back through the stateful connection tracking in the security group. This means the instance has zero attack surface from the network perspective — no port scanning, no brute force, no exploitation of listening services. Vault listens on the Tailscale interface (100.x.y.z:8200), which is only reachable by authenticated tailnet members.
+
+**VPC Endpoints (optional, for private subnet deployments):**
+
+The S3 Gateway endpoint is free and keeps S3 traffic within the AWS network. Add it regardless of subnet type:
+
+```hcl
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = var.vpc_id
+  service_name      = "com.amazonaws.ap-south-1.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [var.route_table_id]
+
+  tags = {
+    Name      = "vault-s3-endpoint"
+    ManagedBy = "terraform"
+  }
+}
+```
+
+> **Interface endpoints (KMS, SSM, CloudWatch)** cost ~$7.20/month each ($14.40+ total). Defer these unless you move to a private subnet with no internet gateway. Without them, KMS/SSM/CloudWatch API calls route through the internet gateway, which is acceptable for a Tailscale-only instance with no inbound rules.
+
 ### 1.6 EC2 Instance (`main.tf`)
 
 - AMI: latest Ubuntu 24.04 LTS arm64 (use `aws_ami` data source)
@@ -264,6 +701,74 @@ Enable MFA Delete on the bucket for additional protection against backup tamperi
 - Tags: `Name: vault`, `ManagedBy: terraform`
 - Monitoring: detailed monitoring enabled (1-minute CloudWatch metrics)
 
+**EC2 instance resource:**
+
+```hcl
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+}
+
+resource "aws_instance" "vault" {
+  ami                  = data.aws_ami.ubuntu.id
+  instance_type        = var.instance_type # "t4g.micro" or "t4g.small"
+  iam_instance_profile = aws_iam_instance_profile.vault.name
+  monitoring           = true # Detailed monitoring (1-min metrics)
+
+  vpc_security_group_ids = [aws_security_group.vault.id]
+  subnet_id              = var.subnet_id
+
+  root_block_device {
+    volume_size           = 30
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = true
+    tags                  = { Name = "vault-root", ManagedBy = "terraform" }
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required" # IMDSv2 enforced
+    http_put_response_hop_limit = 1          # Prevent container/proxy SSRF
+    instance_metadata_tags      = "disabled"
+  }
+
+  user_data_base64 = base64encode(templatefile("${path.module}/../scripts/user-data.sh", {
+    vault_version    = var.vault_version
+    kms_key_id       = aws_kms_key.vault_unseal.id
+    tailscale_authkey = var.tailscale_authkey
+    backup_bucket    = aws_s3_bucket.vault_backups.id
+    backup_kms_key   = aws_kms_key.vault_backup.arn
+  }))
+
+  tags = {
+    Name      = "vault"
+    ManagedBy = "terraform"
+  }
+
+  lifecycle {
+    ignore_changes = [ami, user_data_base64]
+  }
+}
+```
+
+> **IMDSv2 enforcement (`http_tokens = "required"`):** This prevents SSRF attacks from extracting instance credentials via the metadata service. Without IMDSv2, any process on the instance (or any SSRF vulnerability in Vault/Tailscale) can `curl http://169.254.169.254/latest/meta-data/iam/security-credentials/` and get the instance role's temporary credentials. IMDSv2 requires a PUT request to get a session token first, which SSRF payloads typically cannot do. The `hop_limit = 1` further restricts metadata access to the instance itself, preventing forwarded requests from reaching IMDS.
+
 ### 1.7 Monitoring (`monitoring.tf`)
 
 - SNS topic for alerts (email subscription to your address)
@@ -272,11 +777,187 @@ Enable MFA Delete on the bucket for additional protection against backup tamperi
 - Optional: CloudWatch log group for Vault audit logs shipped via CloudWatch agent
 - CloudTrail: ensure management events are being logged (KMS usage will appear here)
 
+**Complete `monitoring.tf`:**
+
+```hcl
+# SNS topic for Vault alerts
+resource "aws_sns_topic" "vault_alerts" {
+  name = "vault-alerts"
+  tags = { ManagedBy = "terraform" }
+}
+
+resource "aws_sns_topic_subscription" "vault_alerts_email" {
+  topic_arn = aws_sns_topic.vault_alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+# Alarm 1: Instance status check
+resource "aws_cloudwatch_metric_alarm" "status_check" {
+  alarm_name          = "vault-status-check-failed"
+  alarm_description   = "Vault EC2 instance failed status check"
+  namespace           = "AWS/EC2"
+  metric_name         = "StatusCheckFailed"
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 2
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  dimensions          = { InstanceId = aws_instance.vault.id }
+  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  ok_actions          = [aws_sns_topic.vault_alerts.arn]
+}
+
+# Alarm 2: CPU sustained high
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  alarm_name          = "vault-cpu-high"
+  alarm_description   = "Vault CPU above 90% for 10 minutes"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUUtilization"
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 90
+  comparison_operator = "GreaterThanThreshold"
+  dimensions          = { InstanceId = aws_instance.vault.id }
+  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+}
+
+# Alarm 3: CPU credit balance low (t4g burst credits)
+resource "aws_cloudwatch_metric_alarm" "cpu_credits_low" {
+  alarm_name          = "vault-cpu-credits-low"
+  alarm_description   = "Vault CPU credit balance below 20 — throttling imminent"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUCreditBalance"
+  statistic           = "Minimum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 20
+  comparison_operator = "LessThanThreshold"
+  dimensions          = { InstanceId = aws_instance.vault.id }
+  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+}
+
+# Alarm 4: Disk usage high (requires CloudWatch agent custom metric)
+resource "aws_cloudwatch_metric_alarm" "disk_high" {
+  alarm_name          = "vault-disk-usage-high"
+  alarm_description   = "Vault disk usage above 80%"
+  namespace           = "Vault"
+  metric_name         = "disk_used_percent"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 80
+  comparison_operator = "GreaterThanThreshold"
+  dimensions = {
+    InstanceId = aws_instance.vault.id
+    path       = "/"
+  }
+  alarm_actions = [aws_sns_topic.vault_alerts.arn]
+}
+
+# Alarm 5: Memory usage high (requires CloudWatch agent custom metric)
+resource "aws_cloudwatch_metric_alarm" "memory_high" {
+  alarm_name          = "vault-memory-high"
+  alarm_description   = "Vault memory usage above 85%"
+  namespace           = "Vault"
+  metric_name         = "mem_used_percent"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 85
+  comparison_operator = "GreaterThanThreshold"
+  dimensions          = { InstanceId = aws_instance.vault.id }
+  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+}
+
+# Alarm 6: KMS errors (tracks failed unseal/encrypt operations)
+resource "aws_cloudwatch_metric_alarm" "kms_errors" {
+  alarm_name          = "vault-kms-errors"
+  alarm_description   = "KMS decrypt errors — Vault may fail to unseal on restart"
+  namespace           = "AWS/KMS"
+  metric_name         = "KMSKeyError"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+}
+
+# CloudWatch log group for Vault audit logs
+resource "aws_cloudwatch_log_group" "vault_audit" {
+  name              = "/vault/audit"
+  retention_in_days = 90
+  tags              = { ManagedBy = "terraform" }
+}
+
+resource "aws_cloudwatch_log_group" "vault_system" {
+  name              = "/vault/system"
+  retention_in_days = 30
+  tags              = { ManagedBy = "terraform" }
+}
+```
+
+> **Alarms 4 and 5** (disk and memory) require the CloudWatch agent to be installed and publishing custom metrics to the `Vault` namespace. These alarms will stay in `INSUFFICIENT_DATA` state until the agent is configured in Phase 4.1.
+
 ### 1.8 SSM Configuration (`ssm.tf`)
 
 - SSM Session Document: restrict to specific IAM role ARN
 - Session logging: log to S3 bucket or CloudWatch Logs
 - Require MFA for IAM principals that can call `ssm:StartSession` (enforce via IAM policy condition `aws:MultiFactorAuthPresent`)
+
+**SSM MFA enforcement IAM policy:**
+
+```hcl
+resource "aws_iam_policy" "ssm_mfa_required" {
+  name        = "vault-ssm-mfa-required"
+  description = "Allows SSM StartSession only with MFA"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowSSMWithMFA"
+        Effect = "Allow"
+        Action = [
+          "ssm:StartSession",
+          "ssm:TerminateSession",
+          "ssm:ResumeSession"
+        ]
+        Resource = [
+          "arn:aws:ec2:ap-south-1:${data.aws_caller_identity.current.account_id}:instance/*",
+          "arn:aws:ssm:ap-south-1:${data.aws_caller_identity.current.account_id}:document/SSM-SessionManagerRunShell"
+        ]
+        Condition = {
+          Bool = {
+            "aws:MultiFactorAuthPresent" = "true"
+          }
+          NumericLessThan = {
+            "aws:MultiFactorAuthAge" = "3600"
+          }
+        }
+      },
+      {
+        Sid    = "DenySSMWithoutMFA"
+        Effect = "Deny"
+        Action = [
+          "ssm:StartSession"
+        ]
+        Resource = "*"
+        Condition = {
+          BoolIfExists = {
+            "aws:MultiFactorAuthPresent" = "false"
+          }
+        }
+      }
+    ]
+  })
+}
+```
+
+> **Session recording:** Enable SSM session logging to S3 to maintain an audit trail of all interactive sessions. This complements Vault audit logs by capturing what operators did on the instance, not just what they read from Vault.
 
 ---
 
@@ -288,18 +969,35 @@ The script runs on first boot and does the following in order:
 
 1. System updates: `apt update && apt upgrade -y`, enable `unattended-upgrades`
 2. Install Vault:
-   - Add HashiCorp GPG key and apt repo
-   - `apt install vault` (gets the arm64 binary)
-   - Alternatively, download the specific version binary from releases.hashicorp.com for version pinning
+   - **Do not use `apt install vault` for production** — it pulls non-deterministic versions from the HashiCorp repo
+   - Download the pinned binary with checksum verification:
 
-> **Version pinning:** Do not use `apt install vault` in production — it pulls the latest version non-deterministically. Pin the version:
+> **Version pinning (required for production):**
 > ```bash
-> VAULT_VERSION="1.15.0"  # Pin in Terraform variable
+> VAULT_VERSION="1.18.2"  # Pin in Terraform variable — check releases.hashicorp.com for latest
 > curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_arm64.zip" \
 >   -o /tmp/vault.zip
 > unzip /tmp/vault.zip -d /usr/local/bin
 > chmod 755 /usr/local/bin/vault
 > ```
+
+> **Production hardening for user-data.sh:**
+>
+> - **SHA256 verification:** Always verify the downloaded binary against HashiCorp's published checksums. Download `vault_${VAULT_VERSION}_SHA256SUMS` and `vault_${VAULT_VERSION}_SHA256SUMS.sig`, verify the GPG signature, then `sha256sum --check`. A corrupted or tampered binary is worse than no Vault at all.
+> - **Structured logging:** Redirect all user-data output to both syslog and a dedicated log file: `exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1`. This makes cloud-init debugging possible after the fact.
+> - **Tailscale timeout:** `tailscale up` can hang if the coordination server is unreachable. Add `--timeout=60s` and fail the script if Tailscale doesn't connect. A Vault instance without Tailscale is unreachable and useless.
+> - **Health check polling:** After `systemctl start vault`, poll the health endpoint before declaring success: `for i in $(seq 1 30); do curl -sf http://127.0.0.1:8200/v1/sys/health && break; sleep 2; done`. This catches systemd start failures that would otherwise go unnoticed until you try to init.
+> - **systemd hardening:** Add these directives to the Vault systemd unit for defense in depth:
+>   ```ini
+>   ProtectSystem=full
+>   ProtectHome=true
+>   PrivateTmp=true
+>   NoNewPrivileges=true
+>   CapabilityBoundingSet=CAP_IPC_LOCK CAP_NET_BIND_SERVICE
+>   AmbientCapabilities=CAP_IPC_LOCK
+>   ```
+>   These prevent the Vault process from modifying system files, accessing home directories, or gaining new privileges even if compromised.
+
 3. Install Tailscale:
    - Add Tailscale apt repo
    - `apt install tailscale`
@@ -369,6 +1067,87 @@ After first boot:
 vault token revoke -self
 echo "Root token revoked. Generate a new one with: vault operator generate-root"
 ```
+
+### 2.5 Post-Init Validation (`validate-init.sh`)
+
+Run after init + teardown-root to verify the deployment is correctly configured:
+
+```bash
+#!/bin/bash
+# validate-init.sh — post-init validation checks
+set -euo pipefail
+
+VAULT_ADDR="${VAULT_ADDR:-http://$(tailscale ip -4):8200}"
+export VAULT_ADDR
+
+PASS=0
+FAIL=0
+
+check() {
+  local description="$1"
+  shift
+  if "$@" > /dev/null 2>&1; then
+    echo "  [PASS] $description"
+    ((PASS++))
+  else
+    echo "  [FAIL] $description"
+    ((FAIL++))
+  fi
+}
+
+echo "=== Vault Post-Init Validation ==="
+echo ""
+
+# 1. Vault status
+echo "--- Core Status ---"
+check "Vault is running and responding" vault status -format=json
+check "Vault is unsealed" bash -c 'vault status -format=json | jq -e ".sealed == false"'
+check "Seal type is awskms" bash -c 'vault status -format=json | jq -e ".seal_type == \"awskms\""'
+check "Raft storage is initialized" bash -c 'vault status -format=json | jq -e ".initialized == true"'
+
+# 2. Raft cluster
+echo ""
+echo "--- Raft Storage ---"
+check "Raft peer list is non-empty" bash -c 'vault operator raft list-peers -format=json | jq -e ".data.config.servers | length > 0"'
+
+# 3. Auth methods
+echo ""
+echo "--- Auth Methods ---"
+check "Token auth is enabled" bash -c 'vault auth list -format=json | jq -e ".\"token/\""'
+
+# 4. Secrets engines
+echo ""
+echo "--- Secrets Engines ---"
+check "System backend is accessible" vault secrets list -format=json
+
+# 5. Audit devices
+echo ""
+echo "--- Audit ---"
+check "At least one audit device is enabled" bash -c 'vault audit list -format=json | jq -e "length > 0"'
+check "File audit device exists" bash -c 'vault audit list -format=json | jq -e ".[\"file/\"]"'
+
+# 6. AWS connectivity
+echo ""
+echo "--- AWS Connectivity ---"
+check "S3 backup bucket is reachable" aws s3 ls "s3://vault-raft-backups-$(aws sts get-caller-identity --query Account --output text)" --max-items 1
+check "KMS key is accessible" aws kms describe-key --key-id "$(vault status -format=json | jq -r '.seal_details.kms_key_id // empty')" --region ap-south-1
+
+# 7. Tailscale
+echo ""
+echo "--- Tailscale ---"
+check "Tailscale is running" tailscale status
+check "Vault is listening on Tailscale IP" bash -c 'curl -sf "http://$(tailscale ip -4):8200/v1/sys/health" | jq -e ".initialized == true"'
+
+echo ""
+echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
+
+if [ "$FAIL" -gt 0 ]; then
+  echo "WARNING: Some checks failed. Review before proceeding."
+  exit 1
+fi
+```
+
+> Run this script after Phase 2.3 init and Phase 2.4 root token teardown. It validates that the deployment is functional before proceeding to Phase 3+ configuration.
 
 ---
 
@@ -458,6 +1237,72 @@ Every secret access, authentication, and policy check is now logged with accesso
 Ship audit logs to S3 for immutable retention. Use the CloudWatch agent to forward logs, then configure a CloudWatch Logs subscription to push to S3 with Object Lock (governance mode, 90-day retention). This ensures audit logs cannot be deleted even if the EC2 instance is compromised.
 
 **Retention policy:** 30 days on local disk (logrotate), 90 days in S3 (Object Lock), indefinite in log aggregator (SigNoz/CloudWatch) for querying.
+
+**CloudWatch agent configuration (`/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json`):**
+
+```json
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/vault/audit.log",
+            "log_group_name": "/vault/audit",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 90,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "/vault/system",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "namespace": "Vault",
+    "metrics_collected": {
+      "disk": {
+        "measurement": ["used_percent"],
+        "resources": ["/", "/opt/vault/data"],
+        "metrics_collection_interval": 300
+      },
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 300
+      },
+      "swap": {
+        "measurement": ["swap_used_percent"],
+        "metrics_collection_interval": 300
+      }
+    },
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}"
+    }
+  }
+}
+```
+
+**Start the CloudWatch agent:**
+
+```bash
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+  -s
+```
+
+> **IAM requirement:** The EC2 instance role needs the `CloudWatchAgentServerPolicy` managed policy attached. Add this to `iam.tf` alongside the existing KMS and S3 policies.
 
 ### 4.2 KV Hierarchy Design
 
@@ -608,6 +1453,8 @@ vault write auth/kubernetes-homelab/role/n8n-workflow \
 ```
 
 > **Networking requirement:** Vault must be able to reach the Kubernetes API server to validate service account tokens. For EKS: the Vault EC2 instance must be in the same VPC (or have VPC peering) with security group rules allowing HTTPS to the EKS API endpoint. For homelab Talos cluster on Tailscale: the Talos API server must be reachable via MagicDNS from the Vault EC2 instance. Verify connectivity: `curl -k https://<k8s-api-endpoint>/healthz` from the Vault host.
+
+> **EKS 1.28+ alternative:** AWS Pod Identity is a lighter alternative to IRSA + Vault K8s auth for EKS-native workloads. It reduces operational overhead but doesn't replace Vault for secret management — it's an auth method alternative.
 
 **AWS IAM Auth** — for ECS tasks and Lambda functions:
 
@@ -1095,6 +1942,8 @@ Day N: Offboard a project
 
 ## Phase 5: Backup and Disaster Recovery
 
+> **Alternative:** Vault's built-in snapshot agent (Vault 1.14+) can automate Raft snapshots without cron + bash. Configure via `vault operator raft snapshot-agent` for more reliable, Vault-integrated backups with built-in retry and monitoring.
+
 ### 5.1 backup.sh
 
 ```bash
@@ -1117,6 +1966,103 @@ echo "[$(date)] Backup completed: ${TIMESTAMP}.snap"
 ```
 
 Runs every 6 hours via cron. Vault token for snapshot operations stored in a file readable only by root, with a long TTL policy that only allows `sys/storage/raft/snapshot`.
+
+**Production backup.sh with retry and verification:**
+
+```bash
+#!/bin/bash
+# backup.sh — production version with retry, verification, and CloudWatch metric
+set -euo pipefail
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+SNAPSHOT_FILE="/tmp/vault-raft-${TIMESTAMP}.snap"
+BUCKET="vault-raft-backups-<account-id>"
+BACKUP_KMS_KEY="<backup-kms-key-id>"
+MAX_RETRIES=3
+RETRY_DELAY=30
+
+export VAULT_ADDR="http://<tailscale-ip>:8200"
+export VAULT_TOKEN=$(cat /etc/vault.d/backup-token)
+
+# Health check — abort if Vault is sealed or unreachable
+if ! vault status -format=json 2>/dev/null | jq -e '.sealed == false' > /dev/null; then
+  echo "[$(date)] ERROR: Vault is sealed or unreachable. Skipping backup."
+  aws cloudwatch put-metric-data \
+    --namespace "Vault" \
+    --metric-name "BackupResult" \
+    --value 0 \
+    --unit "Count" \
+    --dimensions Name=InstanceId,Value=$(ec2-metadata -i | cut -d' ' -f2) \
+    2>/dev/null || true
+  exit 1
+fi
+
+# Take snapshot with retry
+for attempt in $(seq 1 $MAX_RETRIES); do
+  if vault operator raft snapshot save "$SNAPSHOT_FILE" 2>/dev/null; then
+    break
+  fi
+  if [ "$attempt" -eq "$MAX_RETRIES" ]; then
+    echo "[$(date)] ERROR: Snapshot failed after $MAX_RETRIES attempts."
+    aws cloudwatch put-metric-data \
+      --namespace "Vault" \
+      --metric-name "BackupResult" \
+      --value 0 \
+      --unit "Count" \
+      --dimensions Name=InstanceId,Value=$(ec2-metadata -i | cut -d' ' -f2) \
+      2>/dev/null || true
+    exit 1
+  fi
+  echo "[$(date)] WARN: Snapshot attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
+  sleep "$RETRY_DELAY"
+done
+
+# Verify snapshot is non-empty
+SNAP_SIZE=$(stat -c%s "$SNAPSHOT_FILE" 2>/dev/null || stat -f%z "$SNAPSHOT_FILE" 2>/dev/null)
+if [ "$SNAP_SIZE" -lt 1024 ]; then
+  echo "[$(date)] ERROR: Snapshot file suspiciously small (${SNAP_SIZE} bytes). Aborting upload."
+  rm -f "$SNAPSHOT_FILE"
+  exit 1
+fi
+
+# Upload to S3 with retry
+for attempt in $(seq 1 $MAX_RETRIES); do
+  if aws s3 cp "$SNAPSHOT_FILE" "s3://${BUCKET}/snapshots/${TIMESTAMP}.snap" \
+    --sse aws:kms \
+    --sse-kms-key-id "$BACKUP_KMS_KEY" 2>/dev/null; then
+    break
+  fi
+  if [ "$attempt" -eq "$MAX_RETRIES" ]; then
+    echo "[$(date)] ERROR: S3 upload failed after $MAX_RETRIES attempts."
+    rm -f "$SNAPSHOT_FILE"
+    exit 1
+  fi
+  echo "[$(date)] WARN: Upload attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
+  sleep "$RETRY_DELAY"
+done
+
+# Verify upload exists in S3
+if ! aws s3 ls "s3://${BUCKET}/snapshots/${TIMESTAMP}.snap" > /dev/null 2>&1; then
+  echo "[$(date)] ERROR: Upload verification failed — object not found in S3."
+  rm -f "$SNAPSHOT_FILE"
+  exit 1
+fi
+
+rm -f "$SNAPSHOT_FILE"
+
+# Report success metric to CloudWatch
+aws cloudwatch put-metric-data \
+  --namespace "Vault" \
+  --metric-name "BackupResult" \
+  --value 1 \
+  --unit "Count" \
+  --dimensions Name=InstanceId,Value=$(ec2-metadata -i | cut -d' ' -f2) \
+  2>/dev/null || true
+
+echo "[$(date)] Backup completed: ${TIMESTAMP}.snap (${SNAP_SIZE} bytes)"
+```
+
+> **CloudWatch integration:** The `BackupResult` metric (1=success, 0=failure) allows you to create a CloudWatch alarm that fires if no successful backup occurs within 24 hours. This catches silent backup failures that cron alone cannot detect.
 
 ### 5.2 restore.sh (disaster recovery runbook)
 
@@ -1227,6 +2173,27 @@ After free tier expires. During free tier: ~$2-3/month (KMS + minor S3).
 | **Total** | **$12-22/mo** |
 
 The original ~$7/mo estimate omits KMS request charges, CloudWatch log ingestion, and data transfer costs. Budget $15/mo for t4g.micro, $22/mo for t4g.small.
+
+**Two-tier cost model:**
+
+| Component | Minimal (t4g.micro, no VPC endpoints) | Full (t4g.small, VPC endpoints, CW agent) |
+|---|---|---|
+| EC2 instance | $6.10 | $12.70 |
+| EBS 30GB gp3 | $2.40 | $2.40 |
+| KMS (2 keys + requests) | $2.50 | $3.00 |
+| S3 (backups, <1GB) | $0.05 | $0.05 |
+| CloudWatch (basic alarms) | $0.00 | $0.00 |
+| CloudWatch (log ingestion + metrics) | $0.00 | $1.50 |
+| Data transfer (Tailscale) | $0.50 | $1.00 |
+| SNS (alarm notifications) | $0.00 | $0.00 |
+| VPC Interface Endpoints (KMS, SSM) | $0.00 | $14.40 |
+| S3 Gateway Endpoint | $0.00 | $0.00 |
+| SSM Session Manager | $0.00 | $0.00 |
+| **Total** | **~$12/mo** | **~$35/mo** |
+
+> **VPC endpoints are optional.** Without them, AWS API calls route through the internet gateway (or NAT). This is fine for a Tailscale-only instance with no inbound rules. Add VPC endpoints only if you move to a private subnet with no internet access, or if compliance requires traffic to stay within the AWS network. The S3 Gateway endpoint is free and worth adding regardless.
+>
+> **Realistic budget:** $20/mo covers the minimal tier comfortably. $41/mo covers the full tier with headroom for KMS request spikes and unexpected data transfer.
 
 ---
 
@@ -1617,6 +2584,8 @@ This prevents credential leakage across subprocesses at the cost of more verbose
 ---
 
 ## Phase 8: Vault MCP Server
+
+> **Note:** The MCP specification has evolved significantly since this document was written. Verify tool definitions and session config format against https://modelcontextprotocol.io/specification before implementation.
 
 The highest-leverage integration for agentic coding. Instead of wrapper scripts and env vars, expose Vault as a set of tools that any MCP-compatible agent can call natively.
 
