@@ -122,9 +122,141 @@ vault-stack/
 └── README.md                # Day-1 runbook, recovery procedures
 ```
 
+## Phase 0: Prerequisites
+
+Complete these before touching any Terraform. Each item is a hard dependency — Phase 1 will fail without them.
+
+### 0.1 Local Tooling
+
+| Tool | Min Version | Check | Install |
+|---|---|---|---|
+| Terraform | >= 1.10 | `terraform version` | [developer.hashicorp.com/terraform/install](https://developer.hashicorp.com/terraform/install) |
+| AWS CLI | v2 | `aws --version` | `brew install awscli` or [aws.amazon.com/cli](https://aws.amazon.com/cli/) |
+| jq | any | `jq --version` | `brew install jq` |
+
+### 0.2 AWS Account & Credentials
+
+1. **AWS account** with admin access (or a role with permissions to create IAM, KMS, S3, EC2, CloudWatch, SNS, SSM resources)
+2. **AWS credentials configured** locally:
+   ```bash
+   aws configure --profile vault-admin
+   # or export AWS_PROFILE=vault-admin
+   ```
+3. **Verify access:**
+   ```bash
+   aws sts get-caller-identity
+   # Should return your account ID and principal ARN
+   ```
+4. **Note your account ID** — needed for the backend.tf placeholder:
+   ```bash
+   aws sts get-caller-identity --query Account --output text
+   ```
+
+### 0.3 VPC & Networking (identify, don't create)
+
+The Terraform config needs three IDs as input variables. Use the default VPC or an existing one:
+
+```bash
+# Default VPC
+aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" \
+  --query "Vpcs[0].VpcId" --output text
+
+# Subnet (pick any in your target AZ)
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
+  --query "Subnets[*].[SubnetId,AvailabilityZone]" --output table
+
+# Route table (main route table for the VPC)
+aws ec2 describe-route-tables --filters "Name=vpc-id,Values=<vpc-id>" \
+  "Name=association.main,Values=true" \
+  --query "RouteTables[0].RouteTableId" --output text
+```
+
+Record these for `terraform.tfvars`:
+- `vpc_id`
+- `subnet_id`
+- `route_table_id`
+
+### 0.4 Tailscale Auth Key
+
+1. **Tailscale account** at [login.tailscale.com](https://login.tailscale.com)
+2. **Generate an auth key** (Settings → Keys → Generate auth key):
+   - Reusable: **no** (single-use for this instance)
+   - Ephemeral: **yes** (node removed if it goes offline for 90+ days)
+   - Pre-authorized tags: `tag:infra`
+3. Save the key — you'll pass it as `tailscale_authkey` to Terraform (via env var, not tfvars file):
+   ```bash
+   export TF_VAR_tailscale_authkey="tskey-auth-..."
+   ```
+
+### 0.5 Bootstrap the Terraform State Bucket
+
+**This must be done before `terraform init` on the main config.** The S3 state bucket is created by a standalone Terraform config in `bootstrap/`:
+
+```bash
+cd vault-stack/bootstrap
+terraform init
+terraform plan    # Review: should create KMS key, S3 bucket, bucket policy
+terraform apply
+```
+
+After apply, note the bucket name (`vault-infra-tfstate-<account-id>`) and update `vault-stack/terraform/backend.tf`:
+
+```bash
+# Replace the placeholder in backend.tf with your actual account ID
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+sed -i '' "s/<account-id>/$ACCOUNT_ID/" ../terraform/backend.tf
+```
+
+**Verify the state bucket exists:**
+```bash
+aws s3 ls | grep vault-infra-tfstate
+```
+
+### 0.6 Prepare `terraform.tfvars`
+
+Create `vault-stack/terraform/terraform.tfvars` (gitignored — never commit this):
+
+```hcl
+vpc_id         = "vpc-xxxxxxxxx"
+subnet_id      = "subnet-xxxxxxxxx"
+route_table_id = "rtb-xxxxxxxxx"
+alert_email    = "you@example.com"
+
+# Optional overrides (defaults are sensible):
+# instance_type    = "t4g.small"
+# vault_version    = "1.18.2"
+# admin_role_name  = "admin"
+# aws_region       = "ap-south-1"
+```
+
+Pass the Tailscale auth key via environment variable (not in tfvars):
+```bash
+export TF_VAR_tailscale_authkey="tskey-auth-..."
+```
+
+### 0.7 Prerequisite Checklist
+
+Run this before proceeding to Phase 1:
+
+```bash
+echo "=== Phase 0 Checklist ==="
+echo -n "Terraform >= 1.10: "; terraform version -json | jq -r '.terraform_version'
+echo -n "AWS CLI: "; aws --version 2>&1 | head -1
+echo -n "AWS identity: "; aws sts get-caller-identity --query Arn --output text
+echo -n "State bucket: "; aws s3 ls | grep vault-infra-tfstate | awk '{print $3}'
+echo -n "VPC ID set: "; grep vpc_id terraform.tfvars 2>/dev/null || echo "MISSING"
+echo -n "Tailscale key set: "; [ -n "${TF_VAR_tailscale_authkey:-}" ] && echo "yes" || echo "MISSING"
+```
+
+All items should resolve. If any show MISSING, fix before continuing.
+
+---
+
 ## Phase 1: Terraform Foundation
 
 ### 1.1 Remote State Setup (manual, one-time)
+
+> **Already done in Phase 0.5.** This section documents what the bootstrap created. If you followed Phase 0, skip to Phase 1.2.
 
 Before anything else, create the state backend. This is a bootstrap step done manually or with a minimal separate Terraform config.
 
