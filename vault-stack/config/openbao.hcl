@@ -1,7 +1,7 @@
-# vault.hcl — Vault server configuration (reference template)
+# openbao.hcl — OpenBao server configuration (reference template)
 #
 # This file is NOT used directly. user-data.sh writes the actual config
-# to /etc/vault.d/vault.hcl with runtime values (Tailscale IP, KMS key ID).
+# to /etc/openbao/openbao.hcl with runtime values (Tailscale IP, KMS key ID).
 # Kept here as a reference for the expected configuration shape.
 
 ui = true
@@ -12,8 +12,8 @@ listener "tcp" {
 }
 
 storage "raft" {
-  path    = "/opt/vault/data"
-  node_id = "vault-1"
+  path    = "/opt/openbao/data"
+  node_id = "openbao-1"
 }
 
 seal "awskms" {

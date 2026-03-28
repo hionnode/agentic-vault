@@ -1,9 +1,9 @@
 data "aws_caller_identity" "current" {}
 
-# --- Vault Auto-Unseal KMS Key ---
+# --- OpenBao Auto-Unseal KMS Key ---
 
-resource "aws_kms_key" "vault_unseal" {
-  description             = "Vault auto-unseal key"
+resource "aws_kms_key" "openbao_unseal" {
+  description             = "OpenBao auto-unseal key"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
@@ -20,10 +20,10 @@ resource "aws_kms_key" "vault_unseal" {
         Resource = "*"
       },
       {
-        Sid    = "AllowVaultUnseal"
+        Sid    = "AllowOpenBaoUnseal"
         Effect = "Allow"
         Principal = {
-          AWS = aws_iam_role.vault_instance.arn
+          AWS = aws_iam_role.openbao_instance.arn
         }
         Action = [
           "kms:Encrypt",
@@ -41,11 +41,11 @@ resource "aws_kms_key" "vault_unseal" {
   })
 
   tags = {
-    Purpose = "vault-auto-unseal"
+    Purpose = "openbao-auto-unseal"
   }
 }
 
-resource "aws_kms_alias" "vault_unseal" {
-  name          = "alias/vault-unseal"
-  target_key_id = aws_kms_key.vault_unseal.id
+resource "aws_kms_alias" "openbao_unseal" {
+  name          = "alias/openbao-unseal"
+  target_key_id = aws_kms_key.openbao_unseal.id
 }

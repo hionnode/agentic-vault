@@ -20,15 +20,15 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-# --- Vault EC2 Instance ---
+# --- OpenBao EC2 Instance ---
 
-resource "aws_instance" "vault" {
+resource "aws_instance" "openbao" {
   ami                  = data.aws_ami.ubuntu.id
   instance_type        = var.instance_type
-  iam_instance_profile = aws_iam_instance_profile.vault.name
+  iam_instance_profile = aws_iam_instance_profile.openbao.name
   monitoring           = true # Detailed monitoring (1-min metrics)
 
-  vpc_security_group_ids = [aws_security_group.vault.id]
+  vpc_security_group_ids = [aws_security_group.openbao.id]
   subnet_id              = var.subnet_id
 
   root_block_device {
@@ -36,7 +36,7 @@ resource "aws_instance" "vault" {
     volume_type           = "gp3"
     encrypted             = true
     delete_on_termination = true
-    tags                  = { Name = "vault-root" }
+    tags                  = { Name = "openbao-root" }
   }
 
   metadata_options {
@@ -47,16 +47,16 @@ resource "aws_instance" "vault" {
   }
 
   user_data_base64 = base64encode(templatefile("${path.module}/../scripts/user-data.sh", {
-    vault_version    = var.vault_version
-    kms_key_id       = aws_kms_key.vault_unseal.id
+    openbao_version  = var.openbao_version
+    kms_key_id       = aws_kms_key.openbao_unseal.id
     aws_region       = var.aws_region
     tailscale_authkey = var.tailscale_authkey
-    backup_bucket    = aws_s3_bucket.vault_backups.id
-    backup_kms_key   = aws_kms_key.vault_backup.arn
+    backup_bucket    = aws_s3_bucket.openbao_backups.id
+    backup_kms_key   = aws_kms_key.openbao_backup.arn
   }))
 
   tags = {
-    Name = "vault"
+    Name = "openbao"
   }
 
   lifecycle {

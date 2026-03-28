@@ -1,20 +1,20 @@
 #!/bin/bash
-# user-data.sh — Cloud-init script for Vault EC2 instance
+# user-data.sh — Cloud-init script for OpenBao EC2 instance
 # Passed via templatefile() in main.tf. Template variables:
-#   ${vault_version}, ${kms_key_id}, ${aws_region},
+#   ${openbao_version}, ${kms_key_id}, ${aws_region},
 #   ${tailscale_authkey}, ${backup_bucket}, ${backup_kms_key}
 set -euo pipefail
 
 # --- Structured logging ---
 exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
-echo "=== Vault user-data starting at $(date -u) ==="
+echo "=== OpenBao user-data starting at $(date -u) ==="
 
 # --- System updates ---
 echo "--- Step 1: System updates ---"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get upgrade -y
-apt-get install -y unattended-upgrades jq unzip curl gnupg
+apt-get install -y unattended-upgrades jq curl gnupg
 
 # Enable unattended security upgrades
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APTCONF'
@@ -22,48 +22,46 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APTCONF
 
-# --- Install Vault (pinned binary with checksum verification) ---
-echo "--- Step 2: Install Vault ${vault_version} ---"
-VAULT_VERSION="${vault_version}"
-VAULT_ARCH="linux_arm64"
-VAULT_URL="https://releases.hashicorp.com/vault/$${VAULT_VERSION}"
-VAULT_ZIP="vault_$${VAULT_VERSION}_$${VAULT_ARCH}.zip"
+# --- Install OpenBao (pinned .deb package with checksum verification) ---
+echo "--- Step 2: Install OpenBao ${openbao_version} ---"
+BAO_VERSION="${openbao_version}"
+BAO_DEB="bao_$${BAO_VERSION}_linux_arm64.deb"
+BAO_URL="https://github.com/openbao/openbao/releases/download/v$${BAO_VERSION}/$${BAO_DEB}"
+BAO_CHECKSUMS_URL="https://github.com/openbao/openbao/releases/download/v$${BAO_VERSION}/bao_$${BAO_VERSION}_SHA256SUMS"
 
 cd /tmp
-curl -fsSL "$${VAULT_URL}/$${VAULT_ZIP}" -o "$${VAULT_ZIP}"
-curl -fsSL "$${VAULT_URL}/vault_$${VAULT_VERSION}_SHA256SUMS" -o SHA256SUMS
-curl -fsSL "$${VAULT_URL}/vault_$${VAULT_VERSION}_SHA256SUMS.sig" -o SHA256SUMS.sig
+curl -fsSL "$${BAO_URL}" -o "$${BAO_DEB}"
+curl -fsSL "$${BAO_CHECKSUMS_URL}" -o SHA256SUMS
 
-# Verify checksum (GPG verification requires importing HashiCorp's key — see docs)
-grep "$${VAULT_ZIP}" SHA256SUMS | sha256sum --check -
-unzip -o "$${VAULT_ZIP}" -d /usr/local/bin
-chmod 755 /usr/local/bin/vault
-rm -f "$${VAULT_ZIP}" SHA256SUMS SHA256SUMS.sig
+# Verify checksum
+grep "$${BAO_DEB}" SHA256SUMS | sha256sum --check -
+dpkg -i "$${BAO_DEB}"
+rm -f "$${BAO_DEB}" SHA256SUMS
 
-vault --version
-echo "Vault binary installed successfully"
+bao --version
+echo "OpenBao binary installed successfully"
 
-# --- Create vault user and directories ---
-echo "--- Step 3: Create vault user and directories ---"
-useradd --system --home /etc/vault.d --shell /bin/false vault || true
-mkdir -p /opt/vault/data /var/log/vault /etc/vault.d
-chown -R vault:vault /opt/vault /var/log/vault /etc/vault.d
-chmod 750 /opt/vault/data
+# --- Create openbao user and directories ---
+echo "--- Step 3: Create openbao user and directories ---"
+useradd --system --home /etc/openbao --shell /bin/false openbao || true
+mkdir -p /opt/openbao/data /var/log/openbao /etc/openbao
+chown -R openbao:openbao /opt/openbao /var/log/openbao /etc/openbao
+chmod 750 /opt/openbao/data
 
 # --- Write systemd unit ---
 echo "--- Step 4: Write systemd unit ---"
-cat > /etc/systemd/system/vault.service <<'SYSTEMD'
+cat > /etc/systemd/system/openbao.service <<'SYSTEMD'
 [Unit]
-Description="HashiCorp Vault - A tool for managing secrets"
-Documentation=https://developer.hashicorp.com/vault/docs
+Description="OpenBao - A tool for managing secrets"
+Documentation=https://openbao.org/docs
 Requires=network-online.target
 After=network-online.target
-ConditionFileNotEmpty=/etc/vault.d/vault.hcl
+ConditionFileNotEmpty=/etc/openbao/openbao.hcl
 
 [Service]
-User=vault
-Group=vault
-ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+User=openbao
+Group=openbao
+ExecStart=/usr/local/bin/bao server -config=/etc/openbao/openbao.hcl
 ExecReload=/bin/kill --signal HUP $MAINPID
 KillMode=process
 KillSignal=SIGINT
@@ -74,7 +72,7 @@ LimitNOFILE=65536
 LimitMEMLOCK=infinity
 
 # Hardening
-ProtectSystem=full
+ ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
@@ -92,7 +90,7 @@ curl -fsSL https://tailscale.com/install.sh | sh
 echo "--- Step 6: Bring Tailscale up ---"
 tailscale up \
   --authkey="${tailscale_authkey}" \
-  --hostname=vault \
+  --hostname=openbao \
   --advertise-tags=tag:infra \
   --timeout=60s
 
@@ -104,9 +102,9 @@ if [ -z "$${TAILSCALE_IP}" ]; then
   exit 1
 fi
 
-# --- Write vault.hcl ---
-echo "--- Step 7: Write vault.hcl ---"
-cat > /etc/vault.d/vault.hcl <<VAULTHCL
+# --- Write openbao.hcl ---
+echo "--- Step 7: Write openbao.hcl ---"
+cat > /etc/openbao/openbao.hcl <<BAOHCL
 ui = true
 
 listener "tcp" {
@@ -115,8 +113,8 @@ listener "tcp" {
 }
 
 storage "raft" {
-  path    = "/opt/vault/data"
-  node_id = "vault-1"
+  path    = "/opt/openbao/data"
+  node_id = "openbao-1"
 }
 
 seal "awskms" {
@@ -131,32 +129,32 @@ telemetry {
   disable_hostname          = true
   prometheus_retention_time = "12h"
 }
-VAULTHCL
+BAOHCL
 
-chown vault:vault /etc/vault.d/vault.hcl
-chmod 640 /etc/vault.d/vault.hcl
+chown openbao:openbao /etc/openbao/openbao.hcl
+chmod 640 /etc/openbao/openbao.hcl
 
-# --- Start Vault ---
-echo "--- Step 8: Start Vault ---"
+# --- Start OpenBao ---
+echo "--- Step 8: Start OpenBao ---"
 systemctl daemon-reload
-systemctl enable vault
-systemctl start vault
+systemctl enable openbao
+systemctl start openbao
 
 # Health check polling
 echo "--- Step 9: Health check ---"
 for i in $(seq 1 30); do
   if curl -sf "http://$${TAILSCALE_IP}:8200/v1/sys/health?standbyok=true&uninitcode=200&sealedcode=200" > /dev/null 2>&1; then
-    echo "Vault is responding (attempt $${i})"
+    echo "OpenBao is responding (attempt $${i})"
     break
   fi
-  echo "Waiting for Vault to start (attempt $${i}/30)..."
+  echo "Waiting for OpenBao to start (attempt $${i}/30)..."
   sleep 2
 done
 
-# Verify Vault is actually responding
+# Verify OpenBao is actually responding
 if ! curl -sf "http://$${TAILSCALE_IP}:8200/v1/sys/health?standbyok=true&uninitcode=200&sealedcode=200" > /dev/null 2>&1; then
-  echo "FATAL: Vault failed to start after 60 seconds"
-  journalctl -u vault --no-pager -n 50
+  echo "FATAL: OpenBao failed to start after 60 seconds"
+  journalctl -u openbao --no-pager -n 50
   exit 1
 fi
 
@@ -180,15 +178,15 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCON
       "files": {
         "collect_list": [
           {
-            "file_path": "/var/log/vault/audit.log",
-            "log_group_name": "/vault/audit",
+            "file_path": "/var/log/openbao/audit.log",
+            "log_group_name": "/openbao/audit",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 90,
             "timezone": "UTC"
           },
           {
             "file_path": "/var/log/syslog",
-            "log_group_name": "/vault/system",
+            "log_group_name": "/openbao/system",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 30,
             "timezone": "UTC"
@@ -198,7 +196,7 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCON
     }
   },
   "metrics": {
-    "namespace": "Vault",
+    "namespace": "OpenBao",
     "metrics_collected": {
       "disk": {
         "measurement": ["used_percent"],
@@ -221,10 +219,10 @@ CWCONFIG
   -a fetch-config -m ec2 \
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
-# --- Logrotate for Vault audit ---
+# --- Logrotate for OpenBao audit ---
 echo "--- Step 11: Configure logrotate ---"
-cat > /etc/logrotate.d/vault <<'LOGROTATE'
-/var/log/vault/audit.log {
+cat > /etc/logrotate.d/openbao <<'LOGROTATE'
+/var/log/openbao/audit.log {
     daily
     rotate 30
     compress
@@ -232,29 +230,29 @@ cat > /etc/logrotate.d/vault <<'LOGROTATE'
     notifempty
     copytruncate
     postrotate
-        systemctl reload vault >/dev/null 2>&1 || true
+        systemctl reload openbao >/dev/null 2>&1 || true
     endscript
 }
 LOGROTATE
 
 # --- Setup backup cron ---
 echo "--- Step 12: Setup backup cron ---"
-cat > /usr/local/bin/vault-backup.sh <<'BACKUP'
+cat > /usr/local/bin/openbao-backup.sh <<'BACKUP'
 #!/bin/bash
 # Wrapper that sets environment for the backup script
-export VAULT_ADDR="http://$(tailscale ip -4):8200"
+export BAO_ADDR="http://$(tailscale ip -4):8200"
 export BACKUP_BUCKET="${backup_bucket}"
 export BACKUP_KMS_KEY="${backup_kms_key}"
 export AWS_DEFAULT_REGION="${aws_region}"
-/opt/vault/scripts/backup.sh
+/opt/openbao/scripts/backup.sh
 BACKUP
-chmod 755 /usr/local/bin/vault-backup.sh
+chmod 755 /usr/local/bin/openbao-backup.sh
 
-mkdir -p /opt/vault/scripts
+mkdir -p /opt/openbao/scripts
 # backup.sh will be deployed separately (see scripts/backup.sh)
 
-echo "0 */6 * * * root /usr/local/bin/vault-backup.sh >> /var/log/vault/backup.log 2>&1" > /etc/cron.d/vault-backup
-chmod 644 /etc/cron.d/vault-backup
+echo "0 */6 * * * root /usr/local/bin/openbao-backup.sh >> /var/log/openbao/backup.log 2>&1" > /etc/cron.d/openbao-backup
+chmod 644 /etc/cron.d/openbao-backup
 
-echo "=== Vault user-data completed at $(date -u) ==="
-echo "Next step: SSM into instance and run init-vault.sh"
+echo "=== OpenBao user-data completed at $(date -u) ==="
+echo "Next step: SSM into instance and run init-openbao.sh"

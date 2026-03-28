@@ -1,7 +1,7 @@
 # --- SSM MFA Enforcement Policy ---
 
 resource "aws_iam_policy" "ssm_mfa_required" {
-  name        = "vault-ssm-mfa-required"
+  name        = "openbao-ssm-mfa-required"
   description = "Allows SSM StartSession only with MFA"
 
   policy = jsonencode({

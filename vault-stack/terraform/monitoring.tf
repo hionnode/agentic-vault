@@ -1,11 +1,11 @@
 # --- SNS Topic ---
 
-resource "aws_sns_topic" "vault_alerts" {
-  name = "vault-alerts"
+resource "aws_sns_topic" "openbao_alerts" {
+  name = "openbao-alerts"
 }
 
-resource "aws_sns_topic_subscription" "vault_alerts_email" {
-  topic_arn = aws_sns_topic.vault_alerts.arn
+resource "aws_sns_topic_subscription" "openbao_alerts_email" {
+  topic_arn = aws_sns_topic.openbao_alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
 }
@@ -13,8 +13,8 @@ resource "aws_sns_topic_subscription" "vault_alerts_email" {
 # --- Alarm 1: Instance Status Check ---
 
 resource "aws_cloudwatch_metric_alarm" "status_check" {
-  alarm_name          = "vault-status-check-failed"
-  alarm_description   = "Vault EC2 instance failed status check"
+  alarm_name          = "openbao-status-check-failed"
+  alarm_description   = "OpenBao EC2 instance failed status check"
   namespace           = "AWS/EC2"
   metric_name         = "StatusCheckFailed"
   statistic           = "Maximum"
@@ -22,16 +22,16 @@ resource "aws_cloudwatch_metric_alarm" "status_check" {
   evaluation_periods  = 2
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
-  ok_actions          = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
+  ok_actions          = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- Alarm 2: CPU Sustained High ---
 
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
-  alarm_name          = "vault-cpu-high"
-  alarm_description   = "Vault CPU above 90% for 10 minutes"
+  alarm_name          = "openbao-cpu-high"
+  alarm_description   = "OpenBao CPU above 90% for 10 minutes"
   namespace           = "AWS/EC2"
   metric_name         = "CPUUtilization"
   statistic           = "Average"
@@ -39,14 +39,14 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   evaluation_periods  = 2
   threshold           = 90
   comparison_operator = "GreaterThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- Alarm 3: CPU Credit Balance Low ---
 
 resource "aws_cloudwatch_metric_alarm" "cpu_credits_low" {
-  alarm_name          = "vault-cpu-credits-low"
+  alarm_name          = "openbao-cpu-credits-low"
   alarm_description   = "CPU credit balance below 20 — throttling imminent"
   namespace           = "AWS/EC2"
   metric_name         = "CPUCreditBalance"
@@ -55,16 +55,16 @@ resource "aws_cloudwatch_metric_alarm" "cpu_credits_low" {
   evaluation_periods  = 2
   threshold           = 20
   comparison_operator = "LessThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- Alarm 4: Disk Usage High (requires CloudWatch agent) ---
 
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
-  alarm_name          = "vault-disk-usage-high"
-  alarm_description   = "Vault disk usage above 80%"
-  namespace           = "Vault"
+  alarm_name          = "openbao-disk-usage-high"
+  alarm_description   = "OpenBao disk usage above 80%"
+  namespace           = "OpenBao"
   metric_name         = "disk_used_percent"
   statistic           = "Maximum"
   period              = 300
@@ -72,33 +72,33 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   threshold           = 80
   comparison_operator = "GreaterThanThreshold"
   dimensions = {
-    InstanceId = aws_instance.vault.id
+    InstanceId = aws_instance.openbao.id
     path       = "/"
   }
-  alarm_actions = [aws_sns_topic.vault_alerts.arn]
+  alarm_actions = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- Alarm 5: Memory Usage High (requires CloudWatch agent) ---
 
 resource "aws_cloudwatch_metric_alarm" "memory_high" {
-  alarm_name          = "vault-memory-high"
-  alarm_description   = "Vault memory usage above 85%"
-  namespace           = "Vault"
+  alarm_name          = "openbao-memory-high"
+  alarm_description   = "OpenBao memory usage above 85%"
+  namespace           = "OpenBao"
   metric_name         = "mem_used_percent"
   statistic           = "Maximum"
   period              = 300
   evaluation_periods  = 2
   threshold           = 85
   comparison_operator = "GreaterThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- Alarm 6: KMS Errors ---
 
 resource "aws_cloudwatch_metric_alarm" "kms_errors" {
-  alarm_name          = "vault-kms-errors"
-  alarm_description   = "KMS decrypt errors — Vault may fail to unseal on restart"
+  alarm_name          = "openbao-kms-errors"
+  alarm_description   = "KMS decrypt errors — OpenBao may fail to unseal on restart"
   namespace           = "AWS/KMS"
   metric_name         = "KMSKeyError"
   statistic           = "Sum"
@@ -107,17 +107,17 @@ resource "aws_cloudwatch_metric_alarm" "kms_errors" {
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # --- CloudWatch Log Groups ---
 
-resource "aws_cloudwatch_log_group" "vault_audit" {
-  name              = "/vault/audit"
+resource "aws_cloudwatch_log_group" "openbao_audit" {
+  name              = "/openbao/audit"
   retention_in_days = 90
 }
 
-resource "aws_cloudwatch_log_group" "vault_system" {
-  name              = "/vault/system"
+resource "aws_cloudwatch_log_group" "openbao_system" {
+  name              = "/openbao/system"
   retention_in_days = 30
 }

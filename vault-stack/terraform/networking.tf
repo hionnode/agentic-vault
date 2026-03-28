@@ -1,11 +1,11 @@
 # --- Security Group (no inbound, scoped outbound) ---
 
-resource "aws_security_group" "vault" {
-  name        = "vault-instance"
-  description = "Vault EC2 — no inbound, scoped outbound"
+resource "aws_security_group" "openbao" {
+  name        = "openbao-instance"
+  description = "OpenBao EC2 — no inbound, scoped outbound"
   vpc_id      = var.vpc_id
 
-  # No ingress rules — Vault is accessed exclusively via Tailscale
+  # No ingress rules — OpenBao is accessed exclusively via Tailscale
   # Tailscale establishes outbound connections; return traffic via stateful tracking
 
   # HTTPS — AWS API calls (KMS, S3, SSM, STS, CloudWatch), Tailscale coordination
@@ -17,7 +17,7 @@ resource "aws_security_group" "vault" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTP — package manager updates (apt), HashiCorp releases
+  # HTTP — package manager updates (apt), OpenBao releases
   egress {
     description = "HTTP for package updates"
     from_port   = 80
@@ -44,7 +44,7 @@ resource "aws_security_group" "vault" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # NTP — time synchronization (critical for TLS, Vault leases, AWS SigV4)
+  # NTP — time synchronization (critical for TLS, OpenBao leases, AWS SigV4)
   egress {
     description = "NTP"
     from_port   = 123
@@ -72,7 +72,7 @@ resource "aws_security_group" "vault" {
   }
 
   tags = {
-    Name = "vault-instance"
+    Name = "openbao-instance"
   }
 }
 
@@ -85,6 +85,6 @@ resource "aws_vpc_endpoint" "s3" {
   route_table_ids   = [var.route_table_id]
 
   tags = {
-    Name = "vault-s3-endpoint"
+    Name = "openbao-s3-endpoint"
   }
 }

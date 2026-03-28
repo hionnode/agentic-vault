@@ -1,12 +1,12 @@
-# Vault Infrastructure — Implementation Plan
+# OpenBao Infrastructure — Implementation Plan
 
 ## Overview
 
-A single-node HashiCorp Vault deployment on AWS EC2, accessed exclusively over Tailscale, with KMS auto-unseal and S3-backed Raft snapshots. Designed as a centralised secrets manager for agentic coding workflows, homelab infrastructure, and cloud workloads.
+A single-node OpenBao deployment on AWS EC2, accessed exclusively over Tailscale, with KMS auto-unseal and S3-backed Raft snapshots. Designed as a centralised secrets manager for agentic coding workflows, homelab infrastructure, and cloud workloads.
 
 **Target cost:** ~$20/month minimal, ~$41/month with full monitoring (see Phase 6.4)
 
-> **Licensing note:** HashiCorp Vault moved to the Business Source License (BSL 1.1) in August 2023. Vault remains free to use but is no longer open-source. For OSS-only requirements, consider [OpenBao](https://openbao.org), the community-maintained fork. All patterns in this document apply to both Vault and OpenBao.
+> **Licensing note:** We use [OpenBao](https://openbao.org), the open-source (MPL 2.0) Linux Foundation fork of HashiCorp Vault. OpenBao is community-maintained and API-compatible with Vault.
 
 ---
 
@@ -24,7 +24,7 @@ A single-node HashiCorp Vault deployment on AWS EC2, accessed exclusively over T
 │       └──────────────┼─────────────────┘            │
 │                      │                              │
 │               ┌──────▼──────┐                       │
-│               │   EC2 Vault │                       │
+│               │ EC2 OpenBao │                       │
 │               │  t4g.micro  │                       │
 │               │ (Tailscale  │                       │
 │               │  iface only)│                       │
@@ -57,13 +57,13 @@ vault-stack/
 │   ├── backend.tf           # Remote state config (S3 native locking)
 │   └── terraform.tfvars     # gitignored
 ├── scripts/
-│   ├── user-data.sh         # Cloud-init: install Vault + Tailscale, start services
-│   ├── init-vault.sh        # One-time: vault operator init, store recovery keys
+│   ├── user-data.sh         # Cloud-init: install OpenBao + Tailscale, start services
+│   ├── init-openbao.sh      # One-time: bao operator init, store recovery keys
 │   ├── backup.sh            # Raft snapshot → S3 (runs via cron)
 │   ├── restore.sh           # S3 → Raft snapshot restore (disaster recovery)
 │   └── teardown-root.sh     # Revoke root token post-setup
 ├── config/
-│   └── vault.hcl            # Vault server configuration
+│   └── openbao.hcl          # OpenBao server configuration
 ├── policies/
 │   ├── admin.hcl                    # Full admin policy (your user)
 │   ├── templates/
@@ -79,30 +79,30 @@ vault-stack/
 ├── onboarding/
 │   ├── onboard-project.sh   # Read manifest → create policies + AppRoles + auth roles
 │   ├── offboard-project.sh  # Remove project policies, AppRoles, and secrets
-│   ├── validate-project.sh  # Check manifest ↔ Vault policy drift
+│   ├── validate-project.sh  # Check manifest ↔ OpenBao policy drift
 │   └── list-projects.sh     # Show all onboarded projects and their consumers
 ├── consumers/
 │   ├── github-actions/
-│   │   └── vault-action-template.yml  # Reusable GHA workflow snippet
+│   │   └── openbao-action-template.yml # Reusable GHA workflow snippet
 │   ├── eks/
-│   │   ├── vault-injector-annotations.yaml  # Reference annotations
+│   │   ├── openbao-injector-annotations.yaml # Reference annotations
 │   │   ├── eso-secret-store.yaml            # External Secrets Operator config
-│   │   └── setup-k8s-auth.sh               # Configure Vault K8s auth for a cluster
+│   │   └── setup-k8s-auth.sh               # Configure OpenBao K8s auth for a cluster
 │   ├── ecs/
-│   │   ├── entrypoint-vault.sh      # Container entrypoint with Vault fetch
-│   │   └── setup-aws-auth.sh        # Configure Vault AWS IAM auth
+│   │   ├── entrypoint-openbao.sh    # Container entrypoint with OpenBao fetch
+│   │   └── setup-aws-auth.sh        # Configure OpenBao AWS IAM auth
 │   └── local-dev/
 │       ├── session-launcher.sh      # Tmux session launcher with manifest reading
 │       └── claude-code-vault.sh     # Simple Mode wrapper
-├── vault-agent/
-│   ├── vault-agent.hcl              # Agent config for local dev machines
-│   ├── vault-agent-k8s.hcl          # Agent config for K8s sidecar
-│   ├── vault-agent.service          # systemd unit file
+├── openbao-agent/
+│   ├── openbao-agent.hcl            # Agent config for local dev machines
+│   ├── openbao-agent-k8s.hcl        # Agent config for K8s sidecar
+│   ├── openbao-agent.service        # systemd unit file
 │   ├── templates/
 │   │   ├── agent-env.tpl            # Generic agent env template
 │   │   └── aws-creds.tpl           # AWS credential_process template
-│   └── install-vault-agent.sh       # Setup script for dev machines
-├── vault-mcp-server/
+│   └── install-openbao-agent.sh     # Setup script for dev machines
+├── openbao-mcp-server/
 │   ├── package.json
 │   ├── src/
 │   │   ├── index.ts                 # MCP server entrypoint
@@ -111,7 +111,7 @@ vault-stack/
 │   │   │   ├── get-aws-creds.ts
 │   │   │   ├── list-secrets.ts
 │   │   │   └── encrypt-data.ts
-│   │   ├── vault-client.ts
+│   │   ├── openbao-client.ts
 │   │   ├── session.ts
 │   │   ├── risk-gate.ts
 │   │   └── lease-tracker.ts
@@ -224,7 +224,7 @@ alert_email    = "you@example.com"
 
 # Optional overrides (defaults are sensible):
 # instance_type    = "t4g.small"
-# vault_version    = "1.18.2"
+# openbao_version  = "2.1.0"
 # admin_role_name  = "admin"
 # aws_region       = "ap-south-1"
 ```
@@ -418,17 +418,17 @@ terraform {
 }
 ```
 
-> **State file sensitivity:** Terraform state contains resource attributes in plaintext, including KMS key ARNs, IAM role ARNs, security group IDs, and any values passed through `user_data`. Treat the state bucket with the same security posture as the Vault instance itself. The KMS encryption + bucket policy + versioning combination ensures state is encrypted at rest, access-controlled, and recoverable from accidental overwrites.
+> **State file sensitivity:** Terraform state contains resource attributes in plaintext, including KMS key ARNs, IAM role ARNs, security group IDs, and any values passed through `user_data`. Treat the state bucket with the same security posture as the OpenBao instance itself. The KMS encryption + bucket policy + versioning combination ensures state is encrypted at rest, access-controlled, and recoverable from accidental overwrites.
 
 ### 1.2 KMS Key (`kms.tf`)
 
-- Create a symmetric KMS key for Vault auto-unseal
+- Create a symmetric KMS key for OpenBao auto-unseal
 - Key policy conditions:
   - `kms:ViaService: ec2.ap-south-1.amazonaws.com` — restricts usage to EC2 context
   - `kms:CallerAccount` — restricts to your account
-  - Grant `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey` to the Vault instance role only
+  - Grant `kms:Encrypt`, `kms:Decrypt`, `kms:DescribeKey` to the OpenBao instance role only
 - Enable CloudTrail logging on this key (automatic if CloudTrail is enabled for management events)
-- Tag: `Purpose: vault-auto-unseal`
+- Tag: `Purpose: openbao-auto-unseal`
 - Create a separate KMS key for S3 backup encryption (not the same key as unseal — separation of concerns)
 
 **Key policy vs IAM policy — where to put conditions:**
@@ -437,8 +437,8 @@ KMS has two layers of access control: the **key policy** (attached to the key it
 
 ```hcl
 # Key policy: controls WHO can use the key and via WHICH service
-resource "aws_kms_key" "vault_unseal" {
-  description             = "Vault auto-unseal key"
+resource "aws_kms_key" "openbao_unseal" {
+  description             = "OpenBao auto-unseal key"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
@@ -458,7 +458,7 @@ resource "aws_kms_key" "vault_unseal" {
         Sid    = "AllowVaultUnseal"
         Effect = "Allow"
         Principal = {
-          AWS = aws_iam_role.vault_instance.arn
+          AWS = aws_iam_role.openbao_instance.arn
         }
         Action = [
           "kms:Encrypt",
@@ -476,14 +476,14 @@ resource "aws_kms_key" "vault_unseal" {
   })
 
   tags = {
-    Purpose   = "vault-auto-unseal"
+    Purpose   = "openbao-auto-unseal"
     ManagedBy = "terraform"
   }
 }
 
-resource "aws_kms_alias" "vault_unseal" {
-  name          = "alias/vault-unseal"
-  target_key_id = aws_kms_key.vault_unseal.id
+resource "aws_kms_alias" "openbao_unseal" {
+  name          = "alias/openbao-unseal"
+  target_key_id = aws_kms_key.openbao_unseal.id
 }
 ```
 
@@ -491,8 +491,8 @@ resource "aws_kms_alias" "vault_unseal" {
 # IAM policy on the instance role: grants the actions WITHOUT duplicating conditions
 # The key policy's kms:ViaService condition already restricts to EC2 context
 resource "aws_iam_role_policy" "vault_kms" {
-  name = "vault-kms-unseal"
-  role = aws_iam_role.vault_instance.id
+  name = "openbao-kms-unseal"
+  role = aws_iam_role.openbao_instance.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -504,7 +504,7 @@ resource "aws_iam_role_policy" "vault_kms" {
           "kms:Decrypt",
           "kms:DescribeKey"
         ]
-        Resource = aws_kms_key.vault_unseal.arn
+        Resource = aws_kms_key.openbao_unseal.arn
       }
     ]
   })
@@ -515,7 +515,7 @@ resource "aws_iam_role_policy" "vault_kms" {
 
 ### 1.3 S3 Backup Bucket (`s3.tf`)
 
-- Bucket name: `vault-raft-backups-<account-id>`
+- Bucket name: `openbao-raft-backups-<account-id>`
 - Versioning: enabled
 - MFA Delete: enabled (prevents backup destruction even with compromised IAM)
 - Server-side encryption: SSE-KMS using the dedicated backup KMS key
@@ -529,33 +529,33 @@ resource "aws_iam_role_policy" "vault_kms" {
 ```hcl
 # Dedicated KMS key for backup encryption (separate from unseal key)
 resource "aws_kms_key" "vault_backup" {
-  description             = "Vault Raft backup encryption"
+  description             = "OpenBao Raft backup encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
   tags = {
-    Purpose   = "vault-backup-encryption"
+    Purpose   = "openbao-backup-encryption"
     ManagedBy = "terraform"
   }
 }
 
 resource "aws_kms_alias" "vault_backup" {
-  name          = "alias/vault-backup"
-  target_key_id = aws_kms_key.vault_backup.id
+  name          = "alias/openbao-backup"
+  target_key_id = aws_kms_key.openbao_backup.id
 }
 
 # Backup bucket
 resource "aws_s3_bucket" "vault_backups" {
-  bucket = "vault-raft-backups-${data.aws_caller_identity.current.account_id}"
+  bucket = "openbao-raft-backups-${data.aws_caller_identity.current.account_id}"
 
   tags = {
-    Purpose   = "vault-raft-backups"
+    Purpose   = "openbao-raft-backups"
     ManagedBy = "terraform"
   }
 }
 
 resource "aws_s3_bucket_versioning" "vault_backups" {
-  bucket = aws_s3_bucket.vault_backups.id
+  bucket = aws_s3_bucket.openbao_backups.id
 
   versioning_configuration {
     status     = "Enabled"
@@ -564,19 +564,19 @@ resource "aws_s3_bucket_versioning" "vault_backups" {
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "vault_backups" {
-  bucket = aws_s3_bucket.vault_backups.id
+  bucket = aws_s3_bucket.openbao_backups.id
 
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.vault_backup.arn
+      kms_master_key_id = aws_kms_key.openbao_backup.arn
     }
     bucket_key_enabled = true
   }
 }
 
 resource "aws_s3_bucket_public_access_block" "vault_backups" {
-  bucket = aws_s3_bucket.vault_backups.id
+  bucket = aws_s3_bucket.openbao_backups.id
 
   block_public_acls       = true
   block_public_policy     = true
@@ -585,7 +585,7 @@ resource "aws_s3_bucket_public_access_block" "vault_backups" {
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "vault_backups" {
-  bucket = aws_s3_bucket.vault_backups.id
+  bucket = aws_s3_bucket.openbao_backups.id
 
   rule {
     id     = "backup-lifecycle"
@@ -636,17 +636,17 @@ Instance profile with a role carrying two inline policies:
 }
 ```
 
-> **Hardening note:** The `kms:ViaService` condition alone allows any EC2 instance in the region to use this key. Pin to the Vault instance's IAM role ARN by adding:
+> **Hardening note:** The `kms:ViaService` condition alone allows any EC2 instance in the region to use this key. Pin to the OpenBao instance's IAM role ARN by adding:
 > ```json
 > "StringEquals": {
 >   "kms:CallerAccount": "<account-id>",
 >   "kms:ViaService": "ec2.ap-south-1.amazonaws.com"
 > },
 > "ArnEquals": {
->   "aws:PrincipalArn": "arn:aws:iam::<account-id>:role/vault-instance-role"
+>   "aws:PrincipalArn": "arn:aws:iam::<account-id>:role/openbao-instance-role"
 > }
 > ```
-> After the Vault EC2 instance is created, further tighten by adding the instance ID as a condition.
+> After the OpenBao EC2 instance is created, further tighten by adding the instance ID as a condition.
 
 **S3 backup policy:**
 ```json
@@ -654,8 +654,8 @@ Instance profile with a role carrying two inline policies:
   "Effect": "Allow",
   "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
   "Resource": [
-    "arn:aws:s3:::vault-raft-backups-<account-id>",
-    "arn:aws:s3:::vault-raft-backups-<account-id>/*"
+    "arn:aws:s3:::openbao-raft-backups-<account-id>",
+    "arn:aws:s3:::openbao-raft-backups-<account-id>/*"
   ]
 }
 ```
@@ -679,8 +679,8 @@ No other permissions. No `s3:DeleteObject` on the backup bucket from the instanc
       "Principal": "*",
       "Action": ["s3:DeleteObject", "s3:DeleteBucket", "s3:PutBucketPolicy"],
       "Resource": [
-        "arn:aws:s3:::vault-raft-backups-<account-id>",
-        "arn:aws:s3:::vault-raft-backups-<account-id>/*"
+        "arn:aws:s3:::openbao-raft-backups-<account-id>",
+        "arn:aws:s3:::openbao-raft-backups-<account-id>/*"
       ]
     },
     {
@@ -689,13 +689,13 @@ No other permissions. No `s3:DeleteObject` on the backup bucket from the instanc
       "Principal": "*",
       "Action": "s3:*",
       "Resource": [
-        "arn:aws:s3:::vault-raft-backups-<account-id>",
-        "arn:aws:s3:::vault-raft-backups-<account-id>/*"
+        "arn:aws:s3:::openbao-raft-backups-<account-id>",
+        "arn:aws:s3:::openbao-raft-backups-<account-id>/*"
       ],
       "Condition": {
         "StringNotEquals": {
           "aws:PrincipalArn": [
-            "arn:aws:iam::<account-id>:role/vault-instance-role",
+            "arn:aws:iam::<account-id>:role/openbao-instance-role",
             "arn:aws:iam::<account-id>:user/admin"
           ]
         }
@@ -711,20 +711,21 @@ Enable MFA Delete on the bucket for additional protection against backup tamperi
 
 - Use default VPC or a dedicated VPC — keep it simple
 - Security group:
-  - Inbound: **nothing**. Zero open ports. Vault is accessed via Tailscale, SSH via SSM. No public exposure.
+  - Inbound: **nothing**. Zero open ports. OpenBao is accessed via Tailscale, SSH via SSM. No public exposure.
   - Outbound: allow HTTPS (443) for AWS API calls (KMS, S3, SSM, Tailscale coordination), allow UDP 41641 for Tailscale direct connections
+
 - No elastic IP needed — Tailscale provides stable addressing via MagicDNS
 - EC2 instance in a private subnet if you have a NAT gateway, otherwise public subnet is fine since the SG has no inbound rules
 
 **Security group resource:**
 
 ```hcl
-resource "aws_security_group" "vault" {
-  name        = "vault-instance"
-  description = "Vault EC2 — no inbound, scoped outbound"
+resource "aws_security_group" "openbao" {
+  name        = "openbao-instance"
+  description = "OpenBao EC2 — no inbound, scoped outbound"
   vpc_id      = var.vpc_id
 
-  # No ingress rules — Vault is accessed exclusively via Tailscale
+  # No ingress rules — OpenBao is accessed exclusively via Tailscale
   # Tailscale establishes outbound connections and receives replies via stateful tracking
 
   # HTTPS — AWS API calls (KMS, S3, SSM, STS, CloudWatch), Tailscale coordination
@@ -736,7 +737,7 @@ resource "aws_security_group" "vault" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTP — package manager updates (apt), HashiCorp releases
+  # HTTP — package manager updates (apt), OpenBao releases
   egress {
     description = "HTTP for package updates"
     from_port   = 80
@@ -763,7 +764,7 @@ resource "aws_security_group" "vault" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # NTP — time synchronization (critical for TLS, Vault leases, AWS SigV4)
+  # NTP — time synchronization (critical for TLS, OpenBao leases, AWS SigV4)
   egress {
     description = "NTP"
     from_port   = 123
@@ -791,13 +792,13 @@ resource "aws_security_group" "vault" {
   }
 
   tags = {
-    Name      = "vault-instance"
+    Name      = "openbao-instance"
     ManagedBy = "terraform"
   }
 }
 ```
 
-> **No inbound rules at all.** Tailscale works by establishing outbound WireGuard connections to the coordination server and peers. Return traffic flows back through the stateful connection tracking in the security group. This means the instance has zero attack surface from the network perspective — no port scanning, no brute force, no exploitation of listening services. Vault listens on the Tailscale interface (100.x.y.z:8200), which is only reachable by authenticated tailnet members.
+> **No inbound rules at all.** Tailscale works by establishing outbound WireGuard connections to the coordination server and peers. Return traffic flows back through the stateful connection tracking in the security group. This means the instance has zero attack surface from the network perspective — no port scanning, no brute force, no exploitation of listening services. OpenBao listens on the Tailscale interface (100.x.y.z:8200), which is only reachable by authenticated tailnet members.
 
 **VPC Endpoints (optional, for private subnet deployments):**
 
@@ -811,7 +812,7 @@ resource "aws_vpc_endpoint" "s3" {
   route_table_ids   = [var.route_table_id]
 
   tags = {
-    Name      = "vault-s3-endpoint"
+    Name      = "openbao-s3-endpoint"
     ManagedBy = "terraform"
   }
 }
@@ -819,18 +820,19 @@ resource "aws_vpc_endpoint" "s3" {
 
 > **Interface endpoints (KMS, SSM, CloudWatch)** cost ~$7.20/month each ($14.40+ total). Defer these unless you move to a private subnet with no internet gateway. Without them, KMS/SSM/CloudWatch API calls route through the internet gateway, which is acceptable for a Tailscale-only instance with no inbound rules.
 
+
 ### 1.6 EC2 Instance (`main.tf`)
 
 - AMI: latest Ubuntu 24.04 LTS arm64 (use `aws_ami` data source)
 - Instance type: `t4g.micro`
 
-> **Sizing consideration:** t4g.micro (1 vCPU, 1GB RAM) is marginal for Vault + Raft + audit logging under load. If burst credits deplete, CPU throttles to 5% baseline, causing latency spikes. Consider t4g.small (2 vCPU, 2GB RAM, ~$13/mo) for stability. Add a CloudWatch alarm for `CPUCreditBalance < 20` to detect credit exhaustion before it impacts agents.
+> **Sizing consideration:** t4g.micro (1 vCPU, 1GB RAM) is marginal for OpenBao + Raft + audit logging under load. If burst credits deplete, CPU throttles to 5% baseline, causing latency spikes. Consider t4g.small (2 vCPU, 2GB RAM, ~$13/mo) for stability. Add a CloudWatch alarm for `CPUCreditBalance < 20` to detect credit exhaustion before it impacts agents.
 
 - EBS: 30GB gp3, encrypted with default EBS encryption key
 - IMDSv2 enforced: `http_tokens = "required"` — non-negotiable
 - `user_data`: points to `scripts/user-data.sh`
 - Instance profile: attached
-- Tags: `Name: vault`, `ManagedBy: terraform`
+- Tags: `Name: openbao`, `ManagedBy: terraform`
 - Monitoring: detailed monitoring enabled (1-minute CloudWatch metrics)
 
 **EC2 instance resource:**
@@ -856,13 +858,13 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_instance" "vault" {
+resource "aws_instance" "openbao" {
   ami                  = data.aws_ami.ubuntu.id
   instance_type        = var.instance_type # "t4g.micro" or "t4g.small"
-  iam_instance_profile = aws_iam_instance_profile.vault.name
+  iam_instance_profile = aws_iam_instance_profile.openbao.name
   monitoring           = true # Detailed monitoring (1-min metrics)
 
-  vpc_security_group_ids = [aws_security_group.vault.id]
+  vpc_security_group_ids = [aws_security_group.openbao.id]
   subnet_id              = var.subnet_id
 
   root_block_device {
@@ -870,7 +872,7 @@ resource "aws_instance" "vault" {
     volume_type           = "gp3"
     encrypted             = true
     delete_on_termination = true
-    tags                  = { Name = "vault-root", ManagedBy = "terraform" }
+    tags                  = { Name = "openbao-root", ManagedBy = "terraform" }
   }
 
   metadata_options {
@@ -881,15 +883,15 @@ resource "aws_instance" "vault" {
   }
 
   user_data_base64 = base64encode(templatefile("${path.module}/../scripts/user-data.sh", {
-    vault_version    = var.vault_version
-    kms_key_id       = aws_kms_key.vault_unseal.id
+    openbao_version  = var.openbao_version
+    kms_key_id       = aws_kms_key.openbao_unseal.id
     tailscale_authkey = var.tailscale_authkey
-    backup_bucket    = aws_s3_bucket.vault_backups.id
-    backup_kms_key   = aws_kms_key.vault_backup.arn
+    backup_bucket    = aws_s3_bucket.openbao_backups.id
+    backup_kms_key   = aws_kms_key.openbao_backup.arn
   }))
 
   tags = {
-    Name      = "vault"
+    Name      = "openbao"
     ManagedBy = "terraform"
   }
 
@@ -899,35 +901,35 @@ resource "aws_instance" "vault" {
 }
 ```
 
-> **IMDSv2 enforcement (`http_tokens = "required"`):** This prevents SSRF attacks from extracting instance credentials via the metadata service. Without IMDSv2, any process on the instance (or any SSRF vulnerability in Vault/Tailscale) can `curl http://169.254.169.254/latest/meta-data/iam/security-credentials/` and get the instance role's temporary credentials. IMDSv2 requires a PUT request to get a session token first, which SSRF payloads typically cannot do. The `hop_limit = 1` further restricts metadata access to the instance itself, preventing forwarded requests from reaching IMDS.
+> **IMDSv2 enforcement (`http_tokens = "required"`):** This prevents SSRF attacks from extracting instance credentials via the metadata service. Without IMDSv2, any process on the instance (or any SSRF vulnerability in OpenBao/Tailscale) can `curl http://169.254.169.254/latest/meta-data/iam/security-credentials/` and get the instance role's temporary credentials. IMDSv2 requires a PUT request to get a session token first, which SSRF payloads typically cannot do. The `hop_limit = 1` further restricts metadata access to the instance itself, preventing forwarded requests from reaching IMDS.
 
 ### 1.7 Monitoring (`monitoring.tf`)
 
 - SNS topic for alerts (email subscription to your address)
 - CloudWatch alarm: `StatusCheckFailed` > 0 for 2 consecutive periods → SNS
 - CloudWatch alarm: `CPUUtilization` > 90% sustained 10 min → SNS (indicates something wrong)
-- Optional: CloudWatch log group for Vault audit logs shipped via CloudWatch agent
+- Optional: CloudWatch log group for OpenBao audit logs shipped via CloudWatch agent
 - CloudTrail: ensure management events are being logged (KMS usage will appear here)
 
 **Complete `monitoring.tf`:**
 
 ```hcl
-# SNS topic for Vault alerts
-resource "aws_sns_topic" "vault_alerts" {
-  name = "vault-alerts"
+# SNS topic for OpenBao alerts
+resource "aws_sns_topic" "openbao_alerts" {
+  name = "openbao-alerts"
   tags = { ManagedBy = "terraform" }
 }
 
 resource "aws_sns_topic_subscription" "vault_alerts_email" {
-  topic_arn = aws_sns_topic.vault_alerts.arn
+  topic_arn = aws_sns_topic.openbao_alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
 }
 
 # Alarm 1: Instance status check
 resource "aws_cloudwatch_metric_alarm" "status_check" {
-  alarm_name          = "vault-status-check-failed"
-  alarm_description   = "Vault EC2 instance failed status check"
+  alarm_name          = "openbao-status-check-failed"
+  alarm_description   = "OpenBao EC2 instance failed status check"
   namespace           = "AWS/EC2"
   metric_name         = "StatusCheckFailed"
   statistic           = "Maximum"
@@ -935,15 +937,15 @@ resource "aws_cloudwatch_metric_alarm" "status_check" {
   evaluation_periods  = 2
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
-  ok_actions          = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
+  ok_actions          = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # Alarm 2: CPU sustained high
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
-  alarm_name          = "vault-cpu-high"
-  alarm_description   = "Vault CPU above 90% for 10 minutes"
+  alarm_name          = "openbao-cpu-high"
+  alarm_description   = "OpenBao CPU above 90% for 10 minutes"
   namespace           = "AWS/EC2"
   metric_name         = "CPUUtilization"
   statistic           = "Average"
@@ -951,14 +953,14 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   evaluation_periods  = 2
   threshold           = 90
   comparison_operator = "GreaterThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # Alarm 3: CPU credit balance low (t4g burst credits)
 resource "aws_cloudwatch_metric_alarm" "cpu_credits_low" {
-  alarm_name          = "vault-cpu-credits-low"
-  alarm_description   = "Vault CPU credit balance below 20 — throttling imminent"
+  alarm_name          = "openbao-cpu-credits-low"
+  alarm_description   = "OpenBao CPU credit balance below 20 — throttling imminent"
   namespace           = "AWS/EC2"
   metric_name         = "CPUCreditBalance"
   statistic           = "Minimum"
@@ -966,15 +968,15 @@ resource "aws_cloudwatch_metric_alarm" "cpu_credits_low" {
   evaluation_periods  = 2
   threshold           = 20
   comparison_operator = "LessThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # Alarm 4: Disk usage high (requires CloudWatch agent custom metric)
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
-  alarm_name          = "vault-disk-usage-high"
-  alarm_description   = "Vault disk usage above 80%"
-  namespace           = "Vault"
+  alarm_name          = "openbao-disk-usage-high"
+  alarm_description   = "OpenBao disk usage above 80%"
+  namespace           = "OpenBao"
   metric_name         = "disk_used_percent"
   statistic           = "Maximum"
   period              = 300
@@ -982,31 +984,31 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   threshold           = 80
   comparison_operator = "GreaterThanThreshold"
   dimensions = {
-    InstanceId = aws_instance.vault.id
+    InstanceId = aws_instance.openbao.id
     path       = "/"
   }
-  alarm_actions = [aws_sns_topic.vault_alerts.arn]
+  alarm_actions = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # Alarm 5: Memory usage high (requires CloudWatch agent custom metric)
 resource "aws_cloudwatch_metric_alarm" "memory_high" {
-  alarm_name          = "vault-memory-high"
-  alarm_description   = "Vault memory usage above 85%"
-  namespace           = "Vault"
+  alarm_name          = "openbao-memory-high"
+  alarm_description   = "OpenBao memory usage above 85%"
+  namespace           = "OpenBao"
   metric_name         = "mem_used_percent"
   statistic           = "Maximum"
   period              = 300
   evaluation_periods  = 2
   threshold           = 85
   comparison_operator = "GreaterThanThreshold"
-  dimensions          = { InstanceId = aws_instance.vault.id }
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  dimensions          = { InstanceId = aws_instance.openbao.id }
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
 # Alarm 6: KMS errors (tracks failed unseal/encrypt operations)
 resource "aws_cloudwatch_metric_alarm" "kms_errors" {
-  alarm_name          = "vault-kms-errors"
-  alarm_description   = "KMS decrypt errors — Vault may fail to unseal on restart"
+  alarm_name          = "openbao-kms-errors"
+  alarm_description   = "KMS decrypt errors — OpenBao may fail to unseal on restart"
   namespace           = "AWS/KMS"
   metric_name         = "KMSKeyError"
   statistic           = "Sum"
@@ -1015,24 +1017,24 @@ resource "aws_cloudwatch_metric_alarm" "kms_errors" {
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
-  alarm_actions       = [aws_sns_topic.vault_alerts.arn]
+  alarm_actions       = [aws_sns_topic.openbao_alerts.arn]
 }
 
-# CloudWatch log group for Vault audit logs
-resource "aws_cloudwatch_log_group" "vault_audit" {
-  name              = "/vault/audit"
+# CloudWatch log group for OpenBao audit logs
+resource "aws_cloudwatch_log_group" "openbao_audit" {
+  name              = "/openbao/audit"
   retention_in_days = 90
   tags              = { ManagedBy = "terraform" }
 }
 
-resource "aws_cloudwatch_log_group" "vault_system" {
-  name              = "/vault/system"
+resource "aws_cloudwatch_log_group" "openbao_system" {
+  name              = "/openbao/system"
   retention_in_days = 30
   tags              = { ManagedBy = "terraform" }
 }
 ```
 
-> **Alarms 4 and 5** (disk and memory) require the CloudWatch agent to be installed and publishing custom metrics to the `Vault` namespace. These alarms will stay in `INSUFFICIENT_DATA` state until the agent is configured in Phase 4.1.
+> **Alarms 4 and 5** (disk and memory) require the CloudWatch agent to be installed and publishing custom metrics to the `OpenBao` namespace. These alarms will stay in `INSUFFICIENT_DATA` state until the agent is configured in Phase 4.1.
 
 ### 1.8 SSM Configuration (`ssm.tf`)
 
@@ -1044,7 +1046,7 @@ resource "aws_cloudwatch_log_group" "vault_system" {
 
 ```hcl
 resource "aws_iam_policy" "ssm_mfa_required" {
-  name        = "vault-ssm-mfa-required"
+  name        = "openbao-ssm-mfa-required"
   description = "Allows SSM StartSession only with MFA"
 
   policy = jsonencode({
@@ -1089,7 +1091,7 @@ resource "aws_iam_policy" "ssm_mfa_required" {
 }
 ```
 
-> **Session recording:** Enable SSM session logging to S3 to maintain an audit trail of all interactive sessions. This complements Vault audit logs by capturing what operators did on the instance, not just what they read from Vault.
+> **Session recording:** Enable SSM session logging to S3 to maintain an audit trail of all interactive sessions. This complements OpenBao audit logs by capturing what operators did on the instance, not just what they read from OpenBao.
 
 ---
 
@@ -1100,26 +1102,26 @@ resource "aws_iam_policy" "ssm_mfa_required" {
 The script runs on first boot and does the following in order:
 
 1. System updates: `apt update && apt upgrade -y`, enable `unattended-upgrades`
-2. Install Vault:
-   - **Do not use `apt install vault` for production** — it pulls non-deterministic versions from the HashiCorp repo
+2. Install OpenBao:
+   - **Do not use `apt install` for production** — it pulls non-deterministic versions
    - Download the pinned binary with checksum verification:
 
 > **Version pinning (required for production):**
 > ```bash
-> VAULT_VERSION="1.18.2"  # Pin in Terraform variable — check releases.hashicorp.com for latest
-> curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_arm64.zip" \
->   -o /tmp/vault.zip
-> unzip /tmp/vault.zip -d /usr/local/bin
-> chmod 755 /usr/local/bin/vault
+> OPENBAO_VERSION="2.1.0"  # Pin in Terraform variable — check github.com/openbao/openbao/releases for latest
+> curl -fsSL "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/bao_${OPENBAO_VERSION}_linux_arm64.zip" \
+>   -o /tmp/bao.zip
+> unzip /tmp/bao.zip -d /usr/local/bin
+> chmod 755 /usr/local/bin/bao
 > ```
 
 > **Production hardening for user-data.sh:**
 >
-> - **SHA256 verification:** Always verify the downloaded binary against HashiCorp's published checksums. Download `vault_${VAULT_VERSION}_SHA256SUMS` and `vault_${VAULT_VERSION}_SHA256SUMS.sig`, verify the GPG signature, then `sha256sum --check`. A corrupted or tampered binary is worse than no Vault at all.
+> - **SHA256 verification:** Always verify the downloaded binary against the published checksums. Download `bao_${OPENBAO_VERSION}_SHA256SUMS`, then `sha256sum --check`. A corrupted or tampered binary is worse than no OpenBao at all.
 > - **Structured logging:** Redirect all user-data output to both syslog and a dedicated log file: `exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1`. This makes cloud-init debugging possible after the fact.
-> - **Tailscale timeout:** `tailscale up` can hang if the coordination server is unreachable. Add `--timeout=60s` and fail the script if Tailscale doesn't connect. A Vault instance without Tailscale is unreachable and useless.
-> - **Health check polling:** After `systemctl start vault`, poll the health endpoint before declaring success: `for i in $(seq 1 30); do curl -sf http://127.0.0.1:8200/v1/sys/health && break; sleep 2; done`. This catches systemd start failures that would otherwise go unnoticed until you try to init.
-> - **systemd hardening:** Add these directives to the Vault systemd unit for defense in depth:
+> - **Tailscale timeout:** `tailscale up` can hang if the coordination server is unreachable. Add `--timeout=60s` and fail the script if Tailscale doesn't connect. An OpenBao instance without Tailscale is unreachable and useless.
+> - **Health check polling:** After `systemctl start openbao`, poll the health endpoint before declaring success: `for i in $(seq 1 30); do curl -sf http://127.0.0.1:8200/v1/sys/health && break; sleep 2; done`. This catches systemd start failures that would otherwise go unnoticed until you try to init.
+> - **systemd hardening:** Add these directives to the OpenBao systemd unit for defense in depth:
 >   ```ini
 >   ProtectSystem=full
 >   ProtectHome=true
@@ -1128,24 +1130,24 @@ The script runs on first boot and does the following in order:
 >   CapabilityBoundingSet=CAP_IPC_LOCK CAP_NET_BIND_SERVICE
 >   AmbientCapabilities=CAP_IPC_LOCK
 >   ```
->   These prevent the Vault process from modifying system files, accessing home directories, or gaining new privileges even if compromised.
+>   These prevent the OpenBao process from modifying system files, accessing home directories, or gaining new privileges even if compromised.
 
 3. Install Tailscale:
    - Add Tailscale apt repo
    - `apt install tailscale`
-   - `tailscale up --authkey=<key> --hostname=vault --advertise-tags=tag:infra`
+   - `tailscale up --authkey=<key> --hostname=openbao --advertise-tags=tag:infra`
    - Auth key sourced from a Terraform variable (passed via user_data template), ephemeral + single-use
-4. Configure Vault:
-   - Write `vault.hcl` to `/etc/vault.d/vault.hcl`
-   - Create data directory: `/opt/vault/data`, owned by `vault` user
-   - The Tailscale IP is not known at Terraform plan time — the user-data script grabs it dynamically: `tailscale ip -4` after Tailscale is up, then templates it into vault.hcl
-5. Start Vault:
-   - `systemctl enable vault && systemctl start vault`
+4. Configure OpenBao:
+   - Write `openbao.hcl` to `/etc/openbao/openbao.hcl`
+   - Create data directory: `/opt/openbao/data`, owned by `openbao` user
+   - The Tailscale IP is not known at Terraform plan time — the user-data script grabs it dynamically: `tailscale ip -4` after Tailscale is up, then templates it into openbao.hcl
+5. Start OpenBao:
+   - `systemctl enable openbao && systemctl start openbao`
 6. Install CloudWatch agent (optional, for audit log shipping)
 7. Set up cron for backups:
    - Copy `backup.sh` and schedule via cron: `0 */6 * * *` (every 6 hours)
 
-### 2.2 vault.hcl
+### 2.2 openbao.hcl
 
 ```hcl
 ui = true
@@ -1156,8 +1158,8 @@ listener "tcp" {
 }
 
 storage "raft" {
-  path    = "/opt/vault/data"
-  node_id = "vault-1"
+  path    = "/opt/openbao/data"
+  node_id = "openbao-1"
 }
 
 seal "awskms" {
@@ -1174,15 +1176,15 @@ telemetry {
 }
 ```
 
-### 2.3 Vault Initialization (manual, one-time)
+### 2.3 OpenBao Initialization (manual, one-time)
 
 After first boot:
 
 1. SSM into the instance
-2. `export VAULT_ADDR=http://<tailscale-ip>:8200`
-3. `vault operator init -recovery-shares=5 -recovery-threshold=3`
+2. `export BAO_ADDR=http://<tailscale-ip>:8200`
+3. `bao operator init -recovery-shares=5 -recovery-threshold=3`
    - With KMS auto-unseal, these are "recovery keys" not "unseal keys"
-   - Vault auto-unseals via KMS — recovery keys are for emergency operations only
+   - OpenBao auto-unseals via KMS — recovery keys are for emergency operations only
 4. Save recovery keys: split across locations
    - Share 1: 1Password vault
    - Share 2: Bitwarden vault (different service)
@@ -1196,8 +1198,8 @@ After first boot:
 
 ```bash
 #!/bin/bash
-vault token revoke -self
-echo "Root token revoked. Generate a new one with: vault operator generate-root"
+bao token revoke -self
+echo "Root token revoked. Generate a new one with: bao operator generate-root"
 ```
 
 ### 2.5 Post-Init Validation (`validate-init.sh`)
@@ -1209,8 +1211,8 @@ Run after init + teardown-root to verify the deployment is correctly configured:
 # validate-init.sh — post-init validation checks
 set -euo pipefail
 
-VAULT_ADDR="${VAULT_ADDR:-http://$(tailscale ip -4):8200}"
-export VAULT_ADDR
+BAO_ADDR="${BAO_ADDR:-http://$(tailscale ip -4):8200}"
+export BAO_ADDR
 
 PASS=0
 FAIL=0
@@ -1227,48 +1229,48 @@ check() {
   fi
 }
 
-echo "=== Vault Post-Init Validation ==="
+echo "=== OpenBao Post-Init Validation ==="
 echo ""
 
-# 1. Vault status
+# 1. OpenBao status
 echo "--- Core Status ---"
-check "Vault is running and responding" vault status -format=json
-check "Vault is unsealed" bash -c 'vault status -format=json | jq -e ".sealed == false"'
-check "Seal type is awskms" bash -c 'vault status -format=json | jq -e ".seal_type == \"awskms\""'
-check "Raft storage is initialized" bash -c 'vault status -format=json | jq -e ".initialized == true"'
+check "OpenBao is running and responding" bao status -format=json
+check "OpenBao is unsealed" bash -c 'bao status -format=json | jq -e ".sealed == false"'
+check "Seal type is awskms" bash -c 'bao status -format=json | jq -e ".seal_type == \"awskms\""'
+check "Raft storage is initialized" bash -c 'bao status -format=json | jq -e ".initialized == true"'
 
 # 2. Raft cluster
 echo ""
 echo "--- Raft Storage ---"
-check "Raft peer list is non-empty" bash -c 'vault operator raft list-peers -format=json | jq -e ".data.config.servers | length > 0"'
+check "Raft peer list is non-empty" bash -c 'bao operator raft list-peers -format=json | jq -e ".data.config.servers | length > 0"'
 
 # 3. Auth methods
 echo ""
 echo "--- Auth Methods ---"
-check "Token auth is enabled" bash -c 'vault auth list -format=json | jq -e ".\"token/\""'
+check "Token auth is enabled" bash -c 'bao auth list -format=json | jq -e ".\"token/\""'
 
 # 4. Secrets engines
 echo ""
 echo "--- Secrets Engines ---"
-check "System backend is accessible" vault secrets list -format=json
+check "System backend is accessible" bao secrets list -format=json
 
 # 5. Audit devices
 echo ""
 echo "--- Audit ---"
-check "At least one audit device is enabled" bash -c 'vault audit list -format=json | jq -e "length > 0"'
-check "File audit device exists" bash -c 'vault audit list -format=json | jq -e ".[\"file/\"]"'
+check "At least one audit device is enabled" bash -c 'bao audit list -format=json | jq -e "length > 0"'
+check "File audit device exists" bash -c 'bao audit list -format=json | jq -e ".[\"file/\"]"'
 
 # 6. AWS connectivity
 echo ""
 echo "--- AWS Connectivity ---"
-check "S3 backup bucket is reachable" aws s3 ls "s3://vault-raft-backups-$(aws sts get-caller-identity --query Account --output text)" --max-items 1
-check "KMS key is accessible" aws kms describe-key --key-id "$(vault status -format=json | jq -r '.seal_details.kms_key_id // empty')" --region ap-south-1
+check "S3 backup bucket is reachable" aws s3 ls "s3://openbao-raft-backups-$(aws sts get-caller-identity --query Account --output text)" --max-items 1
+check "KMS key is accessible" aws kms describe-key --key-id "$(bao status -format=json | jq -r '.seal_details.kms_key_id // empty')" --region ap-south-1
 
 # 7. Tailscale
 echo ""
 echo "--- Tailscale ---"
 check "Tailscale is running" tailscale status
-check "Vault is listening on Tailscale IP" bash -c 'curl -sf "http://$(tailscale ip -4):8200/v1/sys/health" | jq -e ".initialized == true"'
+check "OpenBao is listening on Tailscale IP" bash -c 'curl -sf "http://$(tailscale ip -4):8200/v1/sys/health" | jq -e ".initialized == true"'
 
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
@@ -1311,10 +1313,10 @@ Add to your Tailscale ACL (admin console or gitops'd policy file):
 }
 ```
 
-- `tag:infra` — the Vault EC2 instance
+- `tag:infra` — the OpenBao EC2 instance
 - `tag:agent` — homelab nodes, CI runners, any machine running agentic workflows
 - `tag:dev` — your personal machines
-- Only `tag:agent` and `tag:dev` can reach Vault on port 8200
+- Only `tag:agent` and `tag:dev` can reach OpenBao on port 8200
 - Only `tag:dev` can SSH (port 22) for emergency access
 - All other tailnet devices are denied by default
 
@@ -1333,25 +1335,25 @@ Add to your Tailscale ACL (admin console or gitops'd policy file):
 
 ---
 
-## Phase 4: Vault Configuration
+## Phase 4: OpenBao Configuration
 
 ### 4.1 Enable Audit Logging
 
 First thing after init, before any other configuration:
 
 ```bash
-vault audit enable file file_path=/var/log/vault/audit.log
+bao audit enable file file_path=/var/log/openbao/audit.log
 ```
 
-Every secret access, authentication, and policy check is now logged with accessor identity, timestamp, and request details. Ship this to SigNoz via the OpenTelemetry collector or CloudWatch agent.
+Every secret access, authentication, and policy check is now logged with accessor identity, timestamp, and request details. Ship to SigNoz via the OpenTelemetry collector or CloudWatch agent.
 
 ### Audit Log Management
 
 **Log rotation (add to instance provisioning):**
 
 ```
-# /etc/logrotate.d/vault
-/var/log/vault/audit.log {
+# /etc/logrotate.d/openbao
+/var/log/openbao/audit.log {
     daily
     rotate 30
     compress
@@ -1359,7 +1361,7 @@ Every secret access, authentication, and policy check is now logged with accesso
     notifempty
     copytruncate
     postrotate
-        systemctl reload vault >/dev/null 2>&1 || true
+        systemctl reload openbao >/dev/null 2>&1 || true
     endscript
 }
 ```
@@ -1367,6 +1369,7 @@ Every secret access, authentication, and policy check is now logged with accesso
 **Log shipping (mandatory, not optional):**
 
 Ship audit logs to S3 for immutable retention. Use the CloudWatch agent to forward logs, then configure a CloudWatch Logs subscription to push to S3 with Object Lock (governance mode, 90-day retention). This ensures audit logs cannot be deleted even if the EC2 instance is compromised.
+
 
 **Retention policy:** 30 days on local disk (logrotate), 90 days in S3 (Object Lock), indefinite in log aggregator (SigNoz/CloudWatch) for querying.
 
@@ -1383,15 +1386,15 @@ Ship audit logs to S3 for immutable retention. Use the CloudWatch agent to forwa
       "files": {
         "collect_list": [
           {
-            "file_path": "/var/log/vault/audit.log",
-            "log_group_name": "/vault/audit",
+            "file_path": "/var/log/openbao/audit.log",
+            "log_group_name": "/openbao/audit",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 90,
             "timezone": "UTC"
           },
           {
             "file_path": "/var/log/syslog",
-            "log_group_name": "/vault/system",
+            "log_group_name": "/openbao/system",
             "log_stream_name": "{instance_id}",
             "retention_in_days": 30,
             "timezone": "UTC"
@@ -1401,11 +1404,11 @@ Ship audit logs to S3 for immutable retention. Use the CloudWatch agent to forwa
     }
   },
   "metrics": {
-    "namespace": "Vault",
+    "namespace": "OpenBao",
     "metrics_collected": {
       "disk": {
         "measurement": ["used_percent"],
-        "resources": ["/", "/opt/vault/data"],
+        "resources": ["/", "/opt/openbao/data"],
         "metrics_collection_interval": 300
       },
       "mem": {
@@ -1494,42 +1497,43 @@ secret/
 - Staging and prod are always separate paths — same key name, different values, different policies
 - `shared/` is for secrets used across multiple projects (GitHub PAT, Docker registry, npm)
 - `infra/` is for infrastructure-layer secrets not tied to any single project
-- Every secret is a single KV entry with a `value` field: `vault kv put secret/projects/X/staging/database-url value="postgresql://..."`
+- Every secret is a single KV entry with a `value` field: `bao kv put secret/projects/X/staging/database-url value="postgresql://..."`
 - KV v2 versioning is enabled — accidental overwrites are recoverable
 
 **Storing secrets:**
 
 ```bash
 # Project secrets — one command per secret, one time
-vault kv put secret/projects/clientA-platform/staging/database-url \
+bao kv put secret/projects/clientA-platform/staging/database-url \
   value="postgresql://app:staging-pass@staging-db.clientA.com:5432/platform"
 
-vault kv put secret/projects/clientA-platform/prod/database-url \
+bao kv put secret/projects/clientA-platform/prod/database-url \
   value="postgresql://app:prod-pass@prod-db.clientA.com:5432/platform"
 
 # Shared secrets
-vault kv put secret/shared/github-token value="ghp_xxxxxxxxxxxx"
+bao kv put secret/shared/github-token value="ghp_xxxxxxxxxxxx"
 
 # Infra secrets
-vault kv put secret/infra/homelab/argocd-admin value="admin-password-here"
+bao kv put secret/infra/homelab/argocd-admin value="admin-password-here"
 ```
 
-Rotating a secret is the same command — KV v2 creates a new version. Every consumer fetches the latest version on next access. One `vault kv put`, zero downstream config changes.
+Rotating a secret is the same command — KV v2 creates a new version. Every consumer fetches the latest version on next access. One `bao kv put`, zero downstream config changes.
 
 ### 4.3 Auth Methods
 
-Every consumer of Vault secrets authenticates using a method appropriate to its runtime environment. Five auth methods cover all use cases.
+Every consumer of OpenBao secrets authenticates using a method appropriate to its runtime environment. Five auth methods cover all use cases.
 
 **AppRole** — for agents, local dev, and CI/CD:
 
 AppRole is the primary method for anything that isn't running in Kubernetes or ECS. Each consumer gets its own AppRole bound to a specific policy. The `role_id` identifies the consumer, the `secret_id` proves identity.
 
+
 ```bash
 # Per-project, per-environment, per-consumer AppRoles
-vault auth enable approle
+bao auth enable approle
 
 # Local dev / Claude Code — staging access
-vault write auth/approle/role/dev-clientA-staging \
+bao write auth/approle/role/dev-clientA-staging \
   token_ttl=2h \
   token_max_ttl=4h \
   secret_id_ttl=24h \
@@ -1537,14 +1541,14 @@ vault write auth/approle/role/dev-clientA-staging \
   token_policies="clientA-staging-dev"
 
 # GitHub Actions — staging deploy
-vault write auth/approle/role/gha-clientA-staging \
+bao write auth/approle/role/gha-clientA-staging \
   token_ttl=30m \
   token_max_ttl=1h \
   secret_id_ttl=0 \
   token_policies="clientA-staging-gha"
 
 # GitHub Actions — prod deploy (shorter TTL, tighter controls)
-vault write auth/approle/role/gha-clientA-prod \
+bao write auth/approle/role/gha-clientA-prod \
   token_ttl=15m \
   token_max_ttl=30m \
   secret_id_ttl=0 \
@@ -1555,56 +1559,58 @@ vault write auth/approle/role/gha-clientA-prod \
 
 Pods authenticate using their Kubernetes service account token. No secrets to inject — the pod's identity IS the credential.
 
+
 ```bash
 # Enable K8s auth for EKS cluster
-vault auth enable -path=kubernetes-eks kubernetes
+bao auth enable -path=kubernetes-eks kubernetes
 
-vault write auth/kubernetes-eks/config \
+bao write auth/kubernetes-eks/config \
   kubernetes_host="https://<eks-cluster-endpoint>" \
   kubernetes_ca_cert=@/tmp/eks-ca.crt
 
-# Map a K8s service account to a Vault policy
-vault write auth/kubernetes-eks/role/clientA-staging-app \
+# Map a K8s service account to an OpenBao policy
+bao write auth/kubernetes-eks/role/clientA-staging-app \
   bound_service_account_names="clientA-app" \
   bound_service_account_namespaces="clientA-staging" \
   policies="clientA-staging-eks" \
   ttl=1h
 
 # Enable K8s auth for homelab Talos cluster
-vault auth enable -path=kubernetes-homelab kubernetes
+bao auth enable -path=kubernetes-homelab kubernetes
 
-vault write auth/kubernetes-homelab/config \
+bao write auth/kubernetes-homelab/config \
   kubernetes_host="https://<talos-cluster-endpoint>" \
   kubernetes_ca_cert=@/tmp/talos-ca.crt
 
-vault write auth/kubernetes-homelab/role/n8n-workflow \
+bao write auth/kubernetes-homelab/role/n8n-workflow \
   bound_service_account_names="n8n" \
   bound_service_account_namespaces="automation" \
   policies="homelab-n8n" \
   ttl=1h
 ```
 
-> **Networking requirement:** Vault must be able to reach the Kubernetes API server to validate service account tokens. For EKS: the Vault EC2 instance must be in the same VPC (or have VPC peering) with security group rules allowing HTTPS to the EKS API endpoint. For homelab Talos cluster on Tailscale: the Talos API server must be reachable via MagicDNS from the Vault EC2 instance. Verify connectivity: `curl -k https://<k8s-api-endpoint>/healthz` from the Vault host.
+> **Networking requirement:** OpenBao must be able to reach the Kubernetes API server to validate service account tokens. For EKS: the OpenBao EC2 instance must be in the same VPC (or have VPC peering) with security group rules allowing HTTPS to the EKS API endpoint. For homelab Talos cluster on Tailscale: the Talos API server must be reachable via MagicDNS from the OpenBao EC2 instance. Verify connectivity: `curl -k https://<k8s-api-endpoint>/healthz` from the OpenBao host.
 
-> **EKS 1.28+ alternative:** AWS Pod Identity is a lighter alternative to IRSA + Vault K8s auth for EKS-native workloads. It reduces operational overhead but doesn't replace Vault for secret management — it's an auth method alternative.
+> **EKS 1.28+ alternative:** AWS Pod Identity is a lighter alternative to IRSA + OpenBao K8s auth for EKS-native workloads. It reduces operational overhead but doesn't replace OpenBao for secret management — it's an auth method alternative.
 
 **AWS IAM Auth** — for ECS tasks and Lambda functions:
 
 ECS tasks and Lambda functions authenticate using their IAM execution role. No secrets to manage — the task's IAM role IS the credential.
 
+
 ```bash
 # Enable AWS auth
-vault auth enable aws
+bao auth enable aws
 
-# Map an ECS task role to a Vault policy
-vault write auth/aws/role/clientA-staging-ecs \
+# Map an ECS task role to an OpenBao policy
+bao write auth/aws/role/clientA-staging-ecs \
   auth_type=iam \
   bound_iam_principal_arn="arn:aws:iam::<account-id>:role/clientA-staging-task-role" \
   policies="clientA-staging-ecs" \
   ttl=1h
 
 # Map a Lambda execution role
-vault write auth/aws/role/clientA-staging-lambda \
+bao write auth/aws/role/clientA-staging-lambda \
   auth_type=iam \
   bound_iam_principal_arn="arn:aws:iam::<account-id>:role/clientA-staging-lambda-role" \
   policies="clientA-staging-lambda" \
@@ -1614,8 +1620,8 @@ vault write auth/aws/role/clientA-staging-lambda \
 **Userpass** — for your admin access:
 
 ```bash
-vault auth enable userpass
-vault write auth/userpass/users/chinmay \
+bao auth enable userpass
+bao write auth/userpass/users/chinmay \
   password="<strong-password>" \
   policies="admin"
 ```
@@ -1625,7 +1631,7 @@ Use this instead of root token for day-to-day management. Root token is revoked 
 **Token Auth** — for quick local dev/testing only:
 
 ```bash
-vault token create -policy=clientA-staging-dev -ttl=2h -use-limit=50
+bao token create -policy=clientA-staging-dev -ttl=2h -use-limit=50
 ```
 
 Acceptable for actively supervised sessions. Not for unattended or production workflows.
@@ -1635,17 +1641,17 @@ Acceptable for actively supervised sessions. Not for unattended or production wo
 **KV v2** at `secret/`:
 
 ```bash
-vault secrets enable -version=2 -path=secret kv
+bao secrets enable -version=2 -path=secret kv
 ```
 
-For all static secrets: API keys, database passwords, third-party tokens. Versioned — accidental overwrites are recoverable via `vault kv rollback`.
+For all static secrets: API keys, database passwords, third-party tokens. Versioned — accidental overwrites are recoverable via `bao kv rollback`.
 
 **AWS Secrets Engine** at `aws/`:
 
 ```bash
-vault secrets enable aws
+bao secrets enable aws
 
-vault write aws/config/root \
+bao write aws/config/root \
   access_key=AKIA... \
   secret_key=... \
   region=ap-south-1
@@ -1653,9 +1659,10 @@ vault write aws/config/root \
 
 Define roles per project-environment with locked-down IAM policy documents. Agents and CI request ephemeral STS credentials that auto-expire:
 
+
 ```bash
 # Staging deploy role — allows common infra operations, denies dangerous actions
-vault write aws/roles/clientA-staging-deploy \
+bao write aws/roles/clientA-staging-deploy \
   credential_type=iam_user \
   default_sts_ttl=1h \
   max_sts_ttl=4h \
@@ -1692,7 +1699,7 @@ vault write aws/roles/clientA-staging-deploy \
 EOF
 
 # Prod deploy role — even tighter, specific resource ARNs
-vault write aws/roles/clientA-prod-deploy \
+bao write aws/roles/clientA-prod-deploy \
   credential_type=iam_user \
   default_sts_ttl=30m \
   max_sts_ttl=1h \
@@ -1718,8 +1725,8 @@ EOF
 **Transit** at `transit/` (optional):
 
 ```bash
-vault secrets enable transit
-vault write transit/keys/agent-data type=aes256-gcm96
+bao secrets enable transit
+bao write transit/keys/agent-data type=aes256-gcm96
 ```
 
 Encryption-as-a-service for agents that need to encrypt data without managing keys.
@@ -1811,14 +1818,14 @@ For dev and CI consumers, `staging/*` wildcards are acceptable — these consume
 
 ### 4.6 Networking for EKS/ECS Consumers
 
-Vault runs on Tailscale with no public endpoint. EKS and ECS workloads need to reach it. Three approaches, in order of recommendation:
+OpenBao runs on Tailscale with no public endpoint. EKS and ECS workloads need to reach it. Three approaches, in order of recommendation:
 
 **Option A: VPC Peering (recommended for AWS-native workloads)**
 
-If Vault's EC2 instance is in the same AWS account as EKS/ECS, peer the VPCs and route traffic internally. Vault listens on its private VPC IP in addition to the Tailscale interface.
+If OpenBao's EC2 instance is in the same AWS account as EKS/ECS, peer the VPCs and route traffic internally. OpenBao listens on its private VPC IP in addition to the Tailscale interface.
 
 ```hcl
-# Add to vault.hcl — listen on both Tailscale and private VPC IP
+# Add to openbao.hcl — listen on both Tailscale and private VPC IP
 listener "tcp" {
   address     = "<tailscale-ip>:8200"
   tls_disable = true
@@ -1827,12 +1834,13 @@ listener "tcp" {
 listener "tcp" {
   address     = "<private-vpc-ip>:8200"
   tls_disable = false
-  tls_cert_file = "/opt/vault/tls/cert.pem"
-  tls_key_file  = "/opt/vault/tls/key.pem"
+  tls_cert_file = "/opt/openbao/tls/cert.pem"
+  tls_key_file  = "/opt/openbao/tls/key.pem"
 }
 ```
 
-The VPC listener requires TLS since traffic traverses the AWS network, not Tailscale's WireGuard tunnel. Use cert-manager or AWS ACM Private CA for cert issuance.
+The VPC listener requires TLS since traffic traverses the AWS network, not Tailscale's WireGuard tunnel.
+ Use cert-manager or AWS ACM Private CA for cert issuance.
 
 Security group addition: allow inbound 8200 from the EKS/ECS VPC CIDR only.
 
@@ -1840,17 +1848,17 @@ Terraform additions: VPC peering connection, route table entries, security group
 
 **Option B: Tailscale Subnet Router**
 
-Run Tailscale as a DaemonSet in EKS or a sidecar in ECS. Pods/tasks access Vault via the Tailscale IP. Most secure — Vault remains fully private on Tailscale — but adds operational complexity (Tailscale auth keys for every node/task).
+Run Tailscale as a DaemonSet in EKS or a sidecar in ECS. Pods/tasks access OpenBao via the Tailscale IP. Most secure — OpenBao remains fully private on Tailscale — but adds operational complexity (Tailscale auth keys for every node/task).
 
-**Option C: Vault Agent Proxy in Cluster**
+**Option C: OpenBao Agent Proxy in Cluster**
 
-Run vault-agent in proxy mode as a Kubernetes Service or ECS service. All pods/tasks talk to the local proxy, the proxy talks to Vault over Tailscale. Reduces the number of components that need direct Vault access. Good for clusters with many consuming services.
+Run bao agent in proxy mode as a Kubernetes Service or ECS service. All pods/tasks talk to the local proxy, the proxy talks to OpenBao over Tailscale. Reduces the number of components that need direct OpenBao access. Good for clusters with many consuming services.
 
 For the initial setup, start with Option A (VPC peering). It's the lowest-friction approach when everything is in the same AWS account. Move to Option C if you scale beyond 5-10 consuming services in a cluster.
 
 ### 4.7 The .vault-manifest.yaml Specification
 
-Every project repository contains a `.vault-manifest.yaml` that declares exactly which secrets the project needs and which consumers require access. This is the single source of truth for project-level Vault configuration.
+Every project repository contains a `.vault-manifest.yaml` that declares exactly which secrets the project needs and which consumers require access. This is the single source of truth for project-level OpenBao configuration.
 
 ```yaml
 # .vault-manifest.yaml — lives in the project repo root
@@ -1913,11 +1921,11 @@ consumers:
     iam_role_template: "arn:aws:iam::<account-id>:role/clientA-{environment}-task-role"
 ```
 
-The manifest is declarative — it says what, not how. The `onboard-project.sh` script reads it and creates all the Vault resources. The session launcher reads it and configures the agent's access scope. The validate script checks that Vault's actual state matches.
+The manifest is declarative — it says what, not how. The `onboard-project.sh` script reads it and creates all the OpenBao resources. The session launcher reads it and configures the agent's access scope. The validate script checks that OpenBao's actual state matches.
 
 ### 4.8 Project Onboarding
 
-The `onboard-project.sh` script reads a `.vault-manifest.yaml` and creates all required Vault resources: policies, AppRoles, K8s auth roles, AWS auth roles.
+The `onboard-project.sh` script reads a `.vault-manifest.yaml` and creates all required OpenBao resources: policies, AppRoles, K8s auth roles, AWS auth roles.
 
 **What it does:**
 
@@ -1931,16 +1939,16 @@ onboard-project.sh <path-to-manifest>
     ├─ 3. Generate policies:
     │     For each (environment × consumer) combination:
     │       - Render policy from template
-    │       - Write: vault policy write <project>-<env>-<consumer> <policy.hcl>
+    │       - Write: bao policy write <project>-<env>-<consumer> <policy.hcl>
     │
     ├─ 4. Create auth roles:
     │     For each consumer:
-    │       AppRole consumers → vault write auth/approle/role/<project>-<env>-<consumer>
-    │       K8s consumers     → vault write auth/kubernetes-<path>/role/<project>-<env>
-    │       AWS IAM consumers → vault write auth/aws/role/<project>-<env>-<consumer>
+    │       AppRole consumers → bao write auth/approle/role/<project>-<env>-<consumer>
+    │       K8s consumers     → bao write auth/kubernetes-<path>/role/<project>-<env>
+    │       AWS IAM consumers → bao write auth/aws/role/<project>-<env>-<consumer>
     │
     ├─ 5. Create AWS dynamic credential roles (if defined):
-    │     vault write aws/roles/<project>-<env>-<role_suffix>
+    │     bao write aws/roles/<project>-<env>-<role_suffix>
     │
     ├─ 6. Output:
     │     - Summary of created resources
@@ -1973,12 +1981,12 @@ onboard-project.sh <path-to-manifest>
 #
 # ⚠ Secret not yet stored: secret/projects/clientA-platform/staging/database-url
 # ⚠ Secret not yet stored: secret/projects/clientA-platform/staging/redis-url
-#   Store them with: vault kv put secret/projects/clientA-platform/staging/<name> value="..."
+#   Store them with: bao kv put secret/projects/clientA-platform/staging/<name> value="..."
 #
 # GitHub Actions setup:
-#   Store VAULT_ROLE_ID_STAGING=def-456 in repo settings
-#   Store VAULT_ROLE_ID_PROD=ghi-789 in repo settings
-#   Generate secret_ids: vault write -f auth/approle/role/gha-clientA-platform-staging/secret-id
+#   Store BAO_ROLE_ID_STAGING=def-456 in repo settings
+#   Store BAO_ROLE_ID_PROD=ghi-789 in repo settings
+#   Generate secret_ids: bao write -f auth/approle/role/gha-clientA-platform-staging/secret-id
 ```
 
 **Manifest validation (run before onboarding):**
@@ -2009,19 +2017,19 @@ done
 echo "Manifest validation passed"
 ```
 
-Add `--dry-run` flag to `onboard-project.sh` that shows what policies and AppRoles will be created without committing them to Vault.
+Add `--dry-run` flag to `onboard-project.sh` that shows what policies and AppRoles will be created without committing them to OpenBao.
 
 **Validation (drift detection):**
 
 ```bash
-# Check if Vault state matches the manifest
+# Check if OpenBao state matches the manifest
 ./onboarding/validate-project.sh /path/to/clientA-platform/.vault-manifest.yaml
 
 # Output:
 # ✓ Policy clientA-platform-staging-dev matches manifest
 # ✗ DRIFT: Policy clientA-platform-staging-gha allows secret/data/shared/npm-token
 #          but manifest does not declare shared/npm-token for gha consumer
-# ✗ MISSING: Secret secret/projects/clientA-platform/prod/stripe-key not stored in Vault
+# ✗ MISSING: Secret secret/projects/clientA-platform/prod/stripe-key not stored in OpenBao
 ```
 
 ### 4.9 DX Summary — From New Project to Secrets Flowing
@@ -2037,12 +2045,12 @@ Day 0: New project starts
   ├─ 2. Run onboard-project.sh
   │     (creates policies, AppRoles, auth roles automatically)
   │
-  ├─ 3. Store the actual secret values in Vault
-  │     vault kv put secret/projects/<project>/staging/<name> value="..."
-  │     vault kv put secret/projects/<project>/prod/<name> value="..."
+  ├─ 3. Store the actual secret values in OpenBao
+  │     bao kv put secret/projects/<project>/staging/<name> value="..."
+  │     bao kv put secret/projects/<project>/prod/<name> value="..."
   │
-  ├─ 4. Store VAULT_ROLE_ID + VAULT_SECRET_ID in GitHub repo settings
-  │     (2 secrets per environment in GitHub — everything else is in Vault)
+  ├─ 4. Store BAO_ROLE_ID + BAO_SECRET_ID in GitHub repo settings
+  │     (2 secrets per environment in GitHub — everything else is in OpenBao)
   │
   ├─ 5. For EKS: create ServiceAccount in the target namespace
   │     For ECS: ensure task role ARN matches what's in the manifest
@@ -2051,7 +2059,7 @@ Day 0: New project starts
 
 Day N: Rotate a secret
   │
-  └─ vault kv put secret/projects/<project>/staging/database-url value="new-value"
+  └─ bao kv put secret/projects/<project>/staging/database-url value="new-value"
      │
      └─ Next time any consumer fetches, they get the new value.
         No GitHub Settings update. No K8s Secret update. No ECS redeploy.
@@ -2061,7 +2069,7 @@ Day N: Add a new secret to an existing project
   │
   ├─ 1. Add the secret to .vault-manifest.yaml
   ├─ 2. Run onboard-project.sh again (idempotent — updates policies, skips existing)
-  ├─ 3. Store the value: vault kv put ...
+  ├─ 3. Store the value: bao kv put ...
   └─ 4. Consumers pick it up on next fetch.
 
 Day N: Offboard a project
@@ -2074,7 +2082,7 @@ Day N: Offboard a project
 
 ## Phase 5: Backup and Disaster Recovery
 
-> **Alternative:** Vault's built-in snapshot agent (Vault 1.14+) can automate Raft snapshots without cron + bash. Configure via `vault operator raft snapshot-agent` for more reliable, Vault-integrated backups with built-in retry and monitoring.
+> **Alternative:** OpenBao's built-in snapshot agent can automate Raft snapshots without cron + bash. Configure via `bao operator raft snapshot-agent` for more reliable, integrated backups with built-in retry and monitoring.
 
 ### 5.1 backup.sh
 
@@ -2083,12 +2091,12 @@ Day N: Offboard a project
 set -euo pipefail
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-SNAPSHOT_FILE="/tmp/vault-raft-${TIMESTAMP}.snap"
-BUCKET="vault-raft-backups-<account-id>"
+SNAPSHOT_FILE="/tmp/openbao-raft-${TIMESTAMP}.snap"
+BUCKET="openbao-raft-backups-<account-id>"
 
-export VAULT_ADDR="http://<tailscale-ip>:8200"
+export BAO_ADDR="http://<tailscale-ip>:8200"
 
-vault operator raft snapshot save "$SNAPSHOT_FILE"
+bao operator raft snapshot save "$SNAPSHOT_FILE"
 aws s3 cp "$SNAPSHOT_FILE" "s3://${BUCKET}/snapshots/${TIMESTAMP}.snap" \
   --sse aws:kms \
   --sse-kms-key-id "<backup-kms-key-id>"
@@ -2097,7 +2105,7 @@ rm -f "$SNAPSHOT_FILE"
 echo "[$(date)] Backup completed: ${TIMESTAMP}.snap"
 ```
 
-Runs every 6 hours via cron. Vault token for snapshot operations stored in a file readable only by root, with a long TTL policy that only allows `sys/storage/raft/snapshot`.
+Runs every 6 hours via cron. OpenBao token for snapshot operations stored in a file readable only by root, with a long TTL policy that only allows `sys/storage/raft/snapshot`.
 
 **Production backup.sh with retry and verification:**
 
@@ -2107,20 +2115,20 @@ Runs every 6 hours via cron. Vault token for snapshot operations stored in a fil
 set -euo pipefail
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-SNAPSHOT_FILE="/tmp/vault-raft-${TIMESTAMP}.snap"
-BUCKET="vault-raft-backups-<account-id>"
+SNAPSHOT_FILE="/tmp/openbao-raft-${TIMESTAMP}.snap"
+BUCKET="openbao-raft-backups-<account-id>"
 BACKUP_KMS_KEY="<backup-kms-key-id>"
 MAX_RETRIES=3
 RETRY_DELAY=30
 
-export VAULT_ADDR="http://<tailscale-ip>:8200"
-export VAULT_TOKEN=$(cat /etc/vault.d/backup-token)
+export BAO_ADDR="http://<tailscale-ip>:8200"
+export BAO_TOKEN=$(cat /etc/openbao/backup-token)
 
-# Health check — abort if Vault is sealed or unreachable
-if ! vault status -format=json 2>/dev/null | jq -e '.sealed == false' > /dev/null; then
-  echo "[$(date)] ERROR: Vault is sealed or unreachable. Skipping backup."
+# Health check — abort if OpenBao is sealed or unreachable
+if ! bao status -format=json 2>/dev/null | jq -e '.sealed == false' > /dev/null; then
+  echo "[$(date)] ERROR: OpenBao is sealed or unreachable. Skipping backup."
   aws cloudwatch put-metric-data \
-    --namespace "Vault" \
+    --namespace "OpenBao" \
     --metric-name "BackupResult" \
     --value 0 \
     --unit "Count" \
@@ -2131,13 +2139,13 @@ fi
 
 # Take snapshot with retry
 for attempt in $(seq 1 $MAX_RETRIES); do
-  if vault operator raft snapshot save "$SNAPSHOT_FILE" 2>/dev/null; then
+  if bao operator raft snapshot save "$SNAPSHOT_FILE" 2>/dev/null; then
     break
   fi
   if [ "$attempt" -eq "$MAX_RETRIES" ]; then
     echo "[$(date)] ERROR: Snapshot failed after $MAX_RETRIES attempts."
     aws cloudwatch put-metric-data \
-      --namespace "Vault" \
+      --namespace "OpenBao" \
       --metric-name "BackupResult" \
       --value 0 \
       --unit "Count" \
@@ -2184,7 +2192,7 @@ rm -f "$SNAPSHOT_FILE"
 
 # Report success metric to CloudWatch
 aws cloudwatch put-metric-data \
-  --namespace "Vault" \
+  --namespace "OpenBao" \
   --metric-name "BackupResult" \
   --value 1 \
   --unit "Count" \
@@ -2199,11 +2207,11 @@ echo "[$(date)] Backup completed: ${TIMESTAMP}.snap (${SNAP_SIZE} bytes)"
 ### 5.2 restore.sh (disaster recovery runbook)
 
 1. `terraform apply` — spins up a fresh EC2 instance (all infra recreated)
-2. SSM in, verify Vault is running but uninitialized
+2. SSM in, verify OpenBao is running but uninitialized
 3. Download latest snapshot: `aws s3 cp s3://<bucket>/snapshots/<latest>.snap /tmp/restore.snap`
-4. `vault operator raft snapshot restore -force /tmp/restore.snap`
-5. Vault auto-unseals via KMS, comes up with all previous state
-6. Verify: `vault status`, `vault secrets list`, spot-check a secret read
+4. `bao operator raft snapshot restore -force /tmp/restore.snap`
+5. OpenBao auto-unseals via KMS, comes up with all previous state
+6. Verify: `bao status`, `bao secrets list`, spot-check a secret read
 7. Update Tailscale if the new instance has a different Tailscale IP (unlikely if you set a stable hostname)
 
 **Target recovery time: 15-20 minutes** if the script is tested and the operator has done it before.
@@ -2225,22 +2233,22 @@ If you haven't tested your restore, you don't have backups.
 ### 6.1 Patching
 
 - OS: `unattended-upgrades` handles security patches automatically
-- Vault: subscribe to HashiCorp security advisories. Upgrade by downloading the new binary, replacing it, and restarting the systemd service. Vault handles unseal automatically on restart via KMS. Test upgrades on a temporary instance first if it's a major version bump.
+- OpenBao: subscribe to OpenBao security advisories. Upgrade by downloading the new binary, replacing it, and restarting the systemd service. OpenBao handles unseal automatically on restart via KMS. Test upgrades on a temporary instance first if it's a major version bump.
 
 ### 6.2 Secret Rotation
 
 - Static KV secrets: establish a rotation schedule (90 days for API keys, 30 days for high-value credentials)
 - AWS dynamic secrets: no rotation needed — they're ephemeral by design
-- Vault's own credentials (the IAM user for the AWS secrets engine): rotate every 90 days
+- OpenBao's own credentials (the IAM user for the AWS secrets engine): rotate every 90 days
 
 ### Automated Secret-ID Rotation
 
 **systemd timer for daily rotation (on dev machine or CI host):**
 
 ```ini
-# /etc/systemd/system/vault-secret-id-rotate.timer
+# /etc/systemd/system/openbao-secret-id-rotate.timer
 [Unit]
-Description=Rotate Vault AppRole secret_id daily
+Description=Rotate OpenBao AppRole secret_id daily
 
 [Timer]
 OnCalendar=*-*-* 04:00:00
@@ -2251,9 +2259,9 @@ WantedBy=timers.target
 ```
 
 ```ini
-# /etc/systemd/system/vault-secret-id-rotate.service
+# /etc/systemd/system/openbao-secret-id-rotate.service
 [Unit]
-Description=Rotate Vault AppRole secret_id
+Description=Rotate OpenBao AppRole secret_id
 
 [Service]
 Type=oneshot
@@ -2264,9 +2272,9 @@ ExecStart=/usr/local/bin/rotate-secret-id.sh
 #!/bin/bash
 # rotate-secret-id.sh
 set -euo pipefail
-NEW_SECRET_ID=$(vault write -f -field=secret_id auth/approle/role/claude-code-agent/secret-id)
-echo "$NEW_SECRET_ID" > /etc/vault.d/secret-id
-chmod 0600 /etc/vault.d/secret-id
+NEW_SECRET_ID=$(bao write -f -field=secret_id auth/approle/role/claude-code-agent/secret-id)
+echo "$NEW_SECRET_ID" > /etc/openbao/secret-id
+chmod 0600 /etc/openbao/secret-id
 ```
 
 **GitHub Actions constraint:** GHA secrets are static — you cannot automate secret_id rotation for GHA-stored credentials. Mitigate by using very short token TTLs (15-30 min) for CI AppRoles, or move to self-hosted runners with Kubernetes auth (which avoids secret_id entirely).
@@ -2274,7 +2282,7 @@ chmod 0600 /etc/vault.d/secret-id
 ### 6.3 Monitoring Checklist
 
 - CloudWatch: instance health, CPU, disk (set alarm at 80% EBS usage)
-- Vault audit logs: watch for failed authentication attempts, unexpected policy denials
+- OpenBao audit logs: watch for failed authentication attempts, unexpected policy denials
 - KMS CloudTrail: alert on unseal operations outside normal restart patterns
 - Tailscale admin: review connected devices monthly, remove stale nodes
 
@@ -2331,7 +2339,7 @@ The original ~$7/mo estimate omits KMS request charges, CloudWatch log ingestion
 
 ## Phase 7: Harness Engineering Layer
 
-Phases 1-6 give you a working Vault that agents can authenticate against. This phase upgrades the integration model from "wrapper script injects env vars" to "harness mediates all secret access." This is the difference between a password manager and a secrets platform.
+Phases 1-6 give you a working OpenBao that agents can authenticate against. This phase upgrades the integration model from "wrapper script injects env vars" to "harness mediates all secret access." This is the difference between a password manager and a secrets platform.
 
 ### 7.1 Why the Wrapper Model Breaks Down
 
@@ -2341,47 +2349,47 @@ The Phase 4/5 wrapper script (`claude-code-vault.sh` from agents.md) pre-fetches
 - **Token expiry mid-task:** 1h TTL runs out during a long Terraform apply. Agent is mid-mutation with no way to re-authenticate.
 - **Context switching:** Moving from client-A to client-B requires killing the session and restarting with different creds. No hot-switch.
 - **Sub-agent inheritance:** Claude Code shells out to `terraform`, `aws cli`, `curl` — all inherit the full credential set. A rogue `curl` exfiltrates everything.
-- **No audit correlation:** Vault logs show "claude-code-agent read secret X." Not "claude-code-agent read secret X during task 'deploy landing page for client-A' in session abc123."
+- **No audit correlation:** OpenBao logs show "claude-code-agent read secret X." Not "claude-code-agent read secret X during task 'deploy landing page for client-A' in session abc123."
 
 The wrapper model is retained as "Simple Mode" for quick local dev. Everything below is "Harness Mode" — the primary production model.
 
-### 7.2 vault-agent as the Credential Sidecar
+### 7.2 bao agent as the Credential Sidecar
 
-Instead of custom bash wrappers managing token lifecycle, deploy HashiCorp's `vault-agent` as a persistent background process on any machine running agents.
+Instead of custom bash wrappers managing token lifecycle, deploy `bao agent` (OpenBao's agent mode) as a persistent background process on any machine running agents.
 
-**What vault-agent handles:**
+**What bao agent handles:**
 
 - Auto-auth via AppRole (or Kubernetes SA, or any auth method)
-- Token renewal — vault-agent renews the token before TTL expiry, handles re-auth on failure, manages grace periods
-- Secret caching — reduces Vault API calls, serves from local cache with TTL awareness
+- Token renewal — bao agent renews the token before TTL expiry, handles re-auth on failure, manages grace periods
+- Secret caching — reduces OpenBao API calls, serves from local cache with TTL awareness
 - Template rendering — can write secrets to templated files (`.env` templates, config files) that agents read
-- API proxy — runs a local listener (e.g., `localhost:8100`) that agents can hit as a Vault proxy without needing a token themselves
+- API proxy — runs a local listener (e.g., `localhost:8100`) that agents can hit as an OpenBao proxy without needing a token themselves
 
 **Installation on agent hosts:**
 
-vault-agent runs as a systemd service on your dev machine, as a sidecar container in K8s pods (via Vault Agent Injector), or baked into the EC2 user-data for cloud-based agent runners.
+bao agent runs as a systemd service on your dev machine, as a sidecar container in K8s pods (via OpenBao Agent Injector), or baked into the EC2 user-data for cloud-based agent runners.
 
-**vault-agent config for local dev machine:**
+**bao agent config for local dev machine:**
 
 ```hcl
-# vault-agent.hcl
+# openbao-agent.hcl
 
-vault {
-  address = "http://vault:8200"  # MagicDNS via Tailscale
+vault {  # OpenBao uses the same HCL stanza name
+  address = "http://openbao:8200"  # MagicDNS via Tailscale
 }
 
 auto_auth {
   method "approle" {
     config = {
-      role_id_file_path   = "/home/<user>/.vault/role-id"
-      secret_id_file_path = "/home/<user>/.vault/secret-id"
+      role_id_file_path   = "/home/<user>/.openbao/role-id"
+      secret_id_file_path = "/home/<user>/.openbao/secret-id"
       remove_secret_id_file_after_reading = false
     }
   }
 
   sink "file" {
     config = {
-      path = "/home/<user>/.vault/agent-token"
+      path = "/home/<user>/.openbao/agent-token"
       mode = 0600
     }
   }
@@ -2397,8 +2405,8 @@ listener "tcp" {
 }
 
 template {
-  source      = "/home/<user>/.vault/templates/agent-env.tpl"
-  destination = "/home/<user>/.vault/rendered/agent.env"
+  source      = "/home/<user>/.openbao/templates/agent-env.tpl"
+  destination = "/home/<user>/.openbao/rendered/agent.env"
   perms       = 0600
 }
 ```
@@ -2416,28 +2424,28 @@ GITHUB_TOKEN={{ .Data.data.value }}
 {{ end }}
 ```
 
-vault-agent re-renders the template when secrets change or leases expire. Agents source the rendered file or hit the local proxy. Token lifecycle is fully managed — no bash cron, no background subshells, no race conditions.
+bao agent re-renders the template when secrets change or leases expire. Agents source the rendered file or hit the local proxy. Token lifecycle is fully managed — no bash cron, no background subshells, no race conditions.
 
 **Updated repo structure additions:**
 
 ```
 vault-infra/
 ├── ...existing structure...
-├── vault-agent/
-│   ├── vault-agent.hcl              # Agent config for local dev machines
-│   ├── vault-agent-k8s.hcl          # Agent config for K8s sidecar
-│   ├── vault-agent.service           # systemd unit file
+├── openbao-agent/
+│   ├── openbao-agent.hcl            # Agent config for local dev machines
+│   ├── openbao-agent-k8s.hcl        # Agent config for K8s sidecar
+│   ├── openbao-agent.service         # systemd unit file
 │   ├── templates/
 │   │   ├── agent-env.tpl            # Generic agent env template
 │   │   ├── claude-code-env.tpl      # Claude Code specific
 │   │   ├── n8n-env.tpl             # n8n specific
 │   │   └── ci-env.tpl              # CI/CD specific
-│   └── install-vault-agent.sh       # Setup script for dev machines
+│   └── install-openbao-agent.sh     # Setup script for dev machines
 ```
 
 ### 7.3 Session-Scoped Identity and Metadata
 
-When the harness (your tmux session launcher, a CI pipeline, an orchestration script) starts an agent session, it should create a Vault token with metadata that ties every audit log entry back to the specific task.
+When the harness (your tmux session launcher, a CI pipeline, an orchestration script) starts an agent session, it should create an OpenBao token with metadata that ties every audit log entry back to the specific task.
 
 **Token creation with session metadata:**
 
@@ -2448,7 +2456,7 @@ CLIENT="client-a"
 TASK="deploy-landing-page"
 REPO="works-on-my-cloud/client-a-infra"
 
-AGENT_TOKEN=$(vault token create \
+AGENT_TOKEN=$(bao token create \
   -policy=agent-aws-${CLIENT} \
   -ttl=4h \
   -display-name="claude-code/${CLIENT}/${TASK}" \
@@ -2460,27 +2468,27 @@ AGENT_TOKEN=$(vault token create \
   -field=token)
 ```
 
-Every Vault audit log entry for this token now includes the session_id, client, task, and repo. When you're debugging "who accessed the production database password at 3am," you can trace it to the exact agent session and task.
+Every OpenBao audit log entry for this token now includes the session_id, client, task, and repo. When you're debugging "who accessed the production database password at 3am," you can trace it to the exact agent session and task.
 
-**Vault entity aliases for persistent agent identity:**
+**OpenBao entity aliases for persistent agent identity:**
 
-For agents that authenticate repeatedly (e.g., Claude Code across multiple sessions), create a Vault entity that aggregates all their tokens:
+For agents that authenticate repeatedly (e.g., Claude Code across multiple sessions), create an OpenBao entity that aggregates all their tokens:
 
 ```bash
 # Create entity for Claude Code agent
-vault write identity/entity \
+bao write identity/entity \
   name="claude-code-agent" \
   metadata=agent_type="claude-code" \
   metadata=owner="chinmay"
 
 # Alias the AppRole auth to this entity
-vault write identity/entity-alias \
+bao write identity/entity-alias \
   name=<role_id> \
   canonical_id=<entity_id> \
   mount_accessor=<approle_mount_accessor>
 ```
 
-Now Vault tracks all activity from this agent across sessions under a single identity, even as tokens rotate.
+Now OpenBao tracks all activity from this agent across sessions under a single identity, even as tokens rotate.
 
 ### 7.4 Multi-Client Isolation
 
@@ -2490,17 +2498,17 @@ For the agency use case — working on client-A's infra, then switching to clien
 
 ```bash
 # Client A — staging
-vault write auth/approle/role/agent-clientA-staging \
+bao write auth/approle/role/agent-clientA-staging \
   token_ttl=2h \
   token_policies="clientA-staging-aws,clientA-staging-kv"
 
 # Client A — production
-vault write auth/approle/role/agent-clientA-prod \
+bao write auth/approle/role/agent-clientA-prod \
   token_ttl=1h \
   token_policies="clientA-prod-aws,clientA-prod-kv"
 
 # Client B — staging
-vault write auth/approle/role/agent-clientB-staging \
+bao write auth/approle/role/agent-clientB-staging \
   token_ttl=2h \
   token_policies="clientB-staging-aws,clientB-staging-kv"
 ```
@@ -2529,16 +2537,16 @@ ENV=$(git config --get project.environment || echo "staging")
 ROLE="agent-${CLIENT}-${ENV}"
 
 # Authenticate with the context-appropriate AppRole
-vault write auth/approle/login \
-  role_id=$(vault read -field=role_id auth/approle/role/${ROLE}/role-id) \
-  secret_id=$(vault write -f -field=secret_id auth/approle/role/${ROLE}/secret-id)
+bao write auth/approle/login \
+  role_id=$(bao read -field=role_id auth/approle/role/${ROLE}/role-id) \
+  secret_id=$(bao write -f -field=secret_id auth/approle/role/${ROLE}/secret-id)
 ```
 
-The agent physically cannot access client-B's secrets while working on client-A. Isolation is enforced by Vault policy, not by developer discipline.
+The agent physically cannot access client-B's secrets while working on client-A. Isolation is enforced by OpenBao policy, not by developer discipline.
 
 ### 7.5 Lease Tracking and Session Cleanup
 
-The harness must track all Vault leases created during a session and revoke them on exit — normal or abnormal.
+The harness must track all OpenBao leases created during a session and revoke them on exit — normal or abnormal.
 
 **Session lifecycle script (`session-lifecycle.sh`):**
 
@@ -2546,20 +2554,20 @@ The harness must track all Vault leases created during a session and revoke them
 #!/bin/bash
 set -euo pipefail
 
-VAULT_ADDR="http://vault:8200"
+BAO_ADDR="http://openbao:8200"
 SESSION_ID=$(uuidgen)
-LEASE_FILE="/tmp/vault-leases-${SESSION_ID}"
+LEASE_FILE="/tmp/openbao-leases-${SESSION_ID}"
 touch "$LEASE_FILE"
 
 # Cleanup function — runs on exit, SIGINT, SIGTERM
 cleanup() {
   echo "[session] Revoking ${SESSION_ID} leases..."
   while IFS= read -r lease_id; do
-    vault lease revoke "$lease_id" 2>/dev/null || true
+    bao lease revoke "$lease_id" 2>/dev/null || true
   done < "$LEASE_FILE"
 
   if [ -n "${AGENT_TOKEN:-}" ]; then
-    VAULT_TOKEN="$AGENT_TOKEN" vault token revoke -self 2>/dev/null || true
+    BAO_TOKEN="$AGENT_TOKEN" bao token revoke -self 2>/dev/null || true
   fi
 
   rm -f "$LEASE_FILE"
@@ -2568,15 +2576,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Create session token with metadata
-AGENT_TOKEN=$(vault token create \
+AGENT_TOKEN=$(bao token create \
   -policy=agent-aws \
   -ttl=4h \
   -metadata="session_id=${SESSION_ID}" \
   -field=token)
-export VAULT_TOKEN="$AGENT_TOKEN"
+export BAO_TOKEN="$AGENT_TOKEN"
 
 # Fetch AWS creds and track the lease
-AWS_RESPONSE=$(vault read -format=json aws/creds/agent-deploy)
+AWS_RESPONSE=$(bao read -format=json aws/creds/agent-deploy)
 echo "$AWS_RESPONSE" | jq -r '.lease_id' >> "$LEASE_FILE"
 
 export AWS_ACCESS_KEY_ID=$(echo "$AWS_RESPONSE" | jq -r '.data.access_key')
@@ -2589,13 +2597,13 @@ claude "$@"
 # cleanup runs automatically via trap
 ```
 
-When you `ctrl-c` a runaway agent, the trap fires, all AWS STS creds are revoked immediately (not waiting for TTL), and the Vault token is destroyed. No lingering credentials.
+When you `ctrl-c` a runaway agent, the trap fires, all AWS STS creds are revoked immediately (not waiting for TTL), and the OpenBao token is destroyed. No lingering credentials.
 
 **For the tmux session launcher:** The teardown function in your tmux session script should call this cleanup before killing the pane. This integrates directly with the tmux + git worktrees launcher you've been building.
 
 ### 7.6 Credential Request Gating (High-Risk Approval)
 
-Some secret accesses should pause for human approval. Vault's Control Groups are enterprise-only, but the harness can implement this at the wrapper level.
+Some secret accesses should pause for human approval. Control Groups are enterprise-only in HashiCorp Vault, but the harness can implement this at the wrapper level.
 
 **Risk classification in the harness:**
 
@@ -2673,22 +2681,22 @@ This ties into your React Native remote control for long-running agents — the 
 
 When Claude Code runs `terraform apply` or `aws s3 cp`, those subprocesses inherit the full environment. To limit this, the harness can use a local credential proxy pattern.
 
-**Option A: vault-agent API proxy (recommended)**
+**Option A: bao agent API proxy (recommended)**
 
-vault-agent's cache listener on `localhost:8100` acts as a credential proxy. Instead of injecting `AWS_ACCESS_KEY_ID` into the environment, configure the AWS SDK to fetch credentials from a local endpoint:
+bao agent's cache listener on `localhost:8100` acts as a credential proxy. Instead of injecting `AWS_ACCESS_KEY_ID` into the environment, configure the AWS SDK to fetch credentials from a local endpoint:
 
 ```bash
 # Instead of env vars, use AWS credential_process
 # ~/.aws/config
 [profile agent]
-credential_process = /usr/local/bin/vault-credential-helper.sh
+credential_process = /usr/local/bin/openbao-credential-helper.sh
 ```
 
 ```bash
-# vault-credential-helper.sh
+# openbao-credential-helper.sh
 #!/bin/bash
 CREDS=$(curl -s http://localhost:8100/v1/aws/creds/agent-deploy \
-  -H "X-Vault-Token: $(cat ~/.vault/agent-token)")
+  -H "X-Vault-Token: $(cat ~/.openbao/agent-token)")  # Header name unchanged for API compat
 
 echo "{
   \"Version\": 1,
@@ -2698,7 +2706,7 @@ echo "{
 }"
 ```
 
-Now the AWS credentials are never in the environment. Each subprocess that needs AWS access calls the credential_process, which goes through vault-agent's proxy. The proxy handles caching and lease management. A rogue `curl` to an external endpoint doesn't carry AWS creds in the environment.
+Now the AWS credentials are never in the environment. Each subprocess that needs AWS access calls the credential_process, which goes through bao agent's proxy. The proxy handles caching and lease management. A rogue `curl` to an external endpoint doesn't carry AWS creds in the environment.
 
 **Option B: Process-specific env injection**
 
@@ -2707,7 +2715,7 @@ For non-AWS tools that can't use credential_process, use `env -i` to launch subp
 ```bash
 # Only pass the specific creds this subprocess needs
 env -i PATH="$PATH" HOME="$HOME" \
-  GITHUB_TOKEN="$(vault kv get -field=value secret/agents/ci/github-token)" \
+  GITHUB_TOKEN="$(bao kv get -field=value secret/agents/ci/github-token)" \
   terraform apply
 ```
 
@@ -2715,11 +2723,11 @@ This prevents credential leakage across subprocesses at the cost of more verbose
 
 ---
 
-## Phase 8: Vault MCP Server
+## Phase 8: OpenBao MCP Server
 
 > **Note:** The MCP specification has evolved significantly since this document was written. Verify tool definitions and session config format against https://modelcontextprotocol.io/specification before implementation.
 
-The highest-leverage integration for agentic coding. Instead of wrapper scripts and env vars, expose Vault as a set of tools that any MCP-compatible agent can call natively.
+The highest-leverage integration for agentic coding. Instead of wrapper scripts and env vars, expose OpenBao as a set of tools that any MCP-compatible agent can call natively.
 
 ### 8.1 Architecture
 
@@ -2736,33 +2744,33 @@ The highest-leverage integration for agentic coding. Instead of wrapper scripts 
        │ (MCP protocol)
        ▼
 ┌──────────────────────────────────────────────┐
-│            Vault MCP Server                  │
+│          OpenBao MCP Server                  │
 │                                              │
 │  1. Validates request against session policy │
 │  2. Checks risk classification              │
-│  3. Authenticates to Vault (or reuses token) │
+│  3. Authenticates to OpenBao (or reuses token)│
 │  4. Fetches secret                          │
 │  5. Tracks lease for cleanup                │
 │  6. Injects session metadata into audit     │
 │  7. Returns credential to agent             │
 └──────┬───────────────────────────────────────┘
-       │ (Vault API over Tailscale)
+       │ (OpenBao API over Tailscale)
        ▼
 ┌──────────────────────────────────────────────┐
-│            Vault Server (EC2)                │
+│          OpenBao Server (EC2)                │
 └──────────────────────────────────────────────┘
 ```
 
 ### 8.2 MCP Tool Definitions
 
-The Vault MCP server exposes these tools:
+The OpenBao MCP server exposes these tools:
 
 **`read_secret`** — Read a static secret from KV v2
 
 ```json
 {
   "name": "read_secret",
-  "description": "Read a secret from Vault KV store. Returns the secret value for the given path. Only paths allowed by your current session policy are accessible.",
+  "description": "Read a secret from OpenBao KV store. Returns the secret value for the given path. Only paths allowed by your current session policy are accessible.",
   "parameters": {
     "path": {
       "type": "string",
@@ -2807,7 +2815,7 @@ The Vault MCP server exposes these tools:
 ```json
 {
   "name": "encrypt_data",
-  "description": "Encrypt sensitive data using Vault Transit engine. Returns ciphertext. Use when you need to store sensitive data in non-secure locations.",
+  "description": "Encrypt sensitive data using OpenBao Transit engine. Returns ciphertext. Use when you need to store sensitive data in non-secure locations.",
   "parameters": {
     "plaintext": {
       "type": "string",
@@ -2826,10 +2834,10 @@ The Vault MCP server exposes these tools:
 
 The MCP server is a lightweight process (TypeScript/Node or Python) that:
 
-- Runs locally on the agent host alongside vault-agent
+- Runs locally on the agent host alongside bao agent
 - Implements the MCP protocol (stdio transport for Claude Code, SSE for remote)
 - Maintains a session context: client, environment, task, allowed paths
-- Delegates all Vault API calls through the local vault-agent proxy
+- Delegates all OpenBao API calls through the local bao agent proxy
 - Tracks leases in memory for session cleanup (see Lease Lifecycle below)
 - Enforces the risk-gating logic from 7.6 before returning high-risk credentials
 
@@ -2848,7 +2856,7 @@ When Claude Code or another MCP client connects, the server reads session contex
 }
 ```
 
-The MCP server uses this to filter and validate every tool call before it reaches Vault. The agent can call `list_available_secrets` to discover what's accessible and `get_aws_credentials` to get scoped creds — but only within the boundaries the harness defined for this session.
+The MCP server uses this to filter and validate every tool call before it reaches OpenBao. The agent can call `list_available_secrets` to discover what's accessible and `get_aws_credentials` to get scoped creds — but only within the boundaries the harness defined for this session.
 
 ### Lease Lifecycle in MCP Server
 
@@ -2873,11 +2881,11 @@ const MAX_LEASES_PER_SESSION = 50;  // Circuit breaker
 process.on('SIGTERM', async () => {
   for (const [id, lease] of activeLeases) {
     try {
-      await vaultClient.revokeLease(lease.leaseId);
+      await openbaoClient.revokeLease(lease.leaseId);
     } catch (e) {
       // Log failed revocations for manual cleanup
       console.error(`Failed to revoke lease ${lease.leaseId}: ${e.message}`);
-      fs.appendFileSync('/tmp/vault-orphaned-leases.log', `${lease.leaseId}\n`);
+      fs.appendFileSync('/tmp/openbao-orphaned-leases.log', `${lease.leaseId}\n`);
     }
   }
   process.exit(0);
@@ -2886,7 +2894,7 @@ process.on('SIGTERM', async () => {
 
 **Circuit breaker:** If `activeLeases.size >= MAX_LEASES_PER_SESSION`, refuse new credential requests. This prevents memory leaks from runaway agents.
 
-**Crash recovery:** On startup, the MCP server checks `/tmp/vault-orphaned-leases.log` and attempts to revoke any orphaned leases from previous crashed sessions.
+**Crash recovery:** On startup, the MCP server checks `/tmp/openbao-orphaned-leases.log` and attempts to revoke any orphaned leases from previous crashed sessions.
 
 ### 8.4 Why MCP Over Wrapper Scripts
 
@@ -2895,8 +2903,8 @@ The fundamental shift: with wrapper scripts, the agent has credentials pushed in
 Benefits:
 
 - **On-demand, not pre-fetched:** Agent only gets credentials it actually requests. Working on frontend code? No AWS creds in memory.
-- **Auditable at the tool level:** Every credential request is a discrete tool call with parameters, logged both by MCP and by Vault.
-- **Gateable:** The MCP server can pause, deny, or modify requests based on risk classification before they reach Vault.
+- **Auditable at the tool level:** Every credential request is a discrete tool call with parameters, logged both by MCP and by OpenBao.
+- **Gateable:** The MCP server can pause, deny, or modify requests based on risk classification before they reach OpenBao.
 - **Agent-native:** The agent understands tools. It can reason about "I need AWS credentials for this task" as a tool call, just like it reasons about reading a file or running a command. No opaque env var magic.
 - **Portable:** Any MCP-compatible agent (Claude Code, custom smolagents, future tools) can use the same server without custom wrapper scripts per agent.
 
@@ -2905,7 +2913,7 @@ Benefits:
 ```
 vault-infra/
 ├── ...existing structure...
-├── vault-mcp-server/
+├── openbao-mcp-server/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── src/
@@ -2915,7 +2923,7 @@ vault-infra/
 │   │   │   ├── get-aws-creds.ts
 │   │   │   ├── list-secrets.ts
 │   │   │   └── encrypt-data.ts
-│   │   ├── vault-client.ts      # Vault API client (via vault-agent proxy)
+│   │   ├── openbao-client.ts      # OpenBao API client (via bao agent proxy)
 │   │   ├── session.ts           # Session context and policy enforcement
 │   │   ├── risk-gate.ts         # Risk classification and approval flow
 │   │   └── lease-tracker.ts     # Track and revoke leases on cleanup
@@ -2926,40 +2934,40 @@ vault-infra/
 
 ### 8.6 Claude Code MCP Configuration
 
-Register the Vault MCP server in Claude Code's config:
+Register the OpenBao MCP server in Claude Code's config:
 
 ```json
 // ~/.claude/mcp.json
 {
   "mcpServers": {
-    "vault": {
+    "openbao": {
       "command": "node",
-      "args": ["/path/to/vault-mcp-server/dist/index.js"],
+      "args": ["/path/to/openbao-mcp-server/dist/index.js"],
       "env": {
-        "VAULT_ADDR": "http://localhost:8100",
-        "SESSION_CONFIG": "/home/<user>/.vault/current-session.json"
+        "BAO_ADDR": "http://localhost:8100",
+        "SESSION_CONFIG": "/home/<user>/.openbao/current-session.json"
       }
     }
   }
 }
 ```
 
-Claude Code now has `read_secret`, `get_aws_credentials`, `list_available_secrets`, and `encrypt_data` as native tools. The agent requests credentials through the tool interface, the MCP server mediates, and Vault provides.
+Claude Code now has `read_secret`, `get_aws_credentials`, `list_available_secrets`, and `encrypt_data` as native tools. The agent requests credentials through the tool interface, the MCP server mediates, and OpenBao provides.
 
 ### 8.7 Implementation Priority
 
-The Vault MCP server is a Phase 8 deliverable — build it after Phases 1-6 are stable and vault-agent (Phase 7) is running. The wrapper scripts from agents.md remain the Phase 4 "simple mode" and continue to work. MCP is the upgrade path.
+The OpenBao MCP server is a Phase 8 deliverable — build it after Phases 1-6 are stable and bao agent (Phase 7) is running. The wrapper scripts from agents.md remain the Phase 4 "simple mode" and continue to work. MCP is the upgrade path.
 
-This is also a strong open-source project for the agency — a generic Vault MCP server is something the agentic coding community doesn't have yet.
+This is also a strong open-source project for the agency — a generic OpenBao MCP server is something the agentic coding community doesn't have yet.
 
 ---
 
 ## Phase 9: High Availability (Future)
 
-Single-node Vault is appropriate for dev/POC but introduces a single point of failure. For agency work with SLA requirements:
+Single-node OpenBao is appropriate for dev/POC but introduces a single point of failure. For agency work with SLA requirements:
 
 **Option A: Multi-node Raft cluster**
-- 3 Vault nodes in an Auto Scaling Group behind a Network Load Balancer
+- 3 OpenBao nodes in an Auto Scaling Group behind a Network Load Balancer
 - Raft consensus handles leader election automatically
 - Cost: ~$25-35/mo (3x t4g.micro)
 
@@ -2975,26 +2983,25 @@ Single-node Vault is appropriate for dev/POC but introduces a single point of fa
 
 ## References
 
-- Vault Deployment Guide (production hardening): https://developer.hashicorp.com/vault/tutorials/operations/production-hardening
-- Vault AWS KMS Auto-Unseal: https://developer.hashicorp.com/vault/tutorials/auto-unseal/autounseal-aws-kms
-- Vault Integrated Raft Storage: https://developer.hashicorp.com/vault/docs/configuration/storage/raft
-- Vault AWS Secrets Engine: https://developer.hashicorp.com/vault/docs/secrets/aws
-- Vault KV v2 Secrets Engine: https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2
-- Vault AppRole Auth: https://developer.hashicorp.com/vault/docs/auth/approle
-- Vault Kubernetes Auth: https://developer.hashicorp.com/vault/docs/auth/kubernetes
-- Vault AWS IAM Auth: https://developer.hashicorp.com/vault/docs/auth/aws
-- Vault Policies: https://developer.hashicorp.com/vault/docs/concepts/policies
-- Vault Raft Snapshot Backup/Restore: https://developer.hashicorp.com/vault/tutorials/raft/raft-snapshot-agent
-- Vault Agent Auto-Auth: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/auto-auth
-- Vault Agent Caching: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/caching
-- Vault Agent Templates: https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/template
-- Vault Agent Injector (Kubernetes): https://developer.hashicorp.com/vault/docs/platform/k8s/injector
-- Vault CSI Provider: https://developer.hashicorp.com/vault/docs/platform/k8s/csi
-- Vault Identity / Entities: https://developer.hashicorp.com/vault/docs/concepts/identity
-- Vault Token Metadata: https://developer.hashicorp.com/vault/docs/concepts/tokens#token-metadata
-- Vault Control Groups: https://developer.hashicorp.com/vault/docs/enterprise/control-groups
+- OpenBao Documentation: https://openbao.org/docs/
+- OpenBao AWS KMS Auto-Unseal: https://openbao.org/docs/configuration/seal/awskms
+- OpenBao Integrated Raft Storage: https://openbao.org/docs/configuration/storage/raft
+- OpenBao AWS Secrets Engine: https://openbao.org/docs/secrets/aws
+- OpenBao KV v2 Secrets Engine: https://openbao.org/docs/secrets/kv/kv-v2
+- OpenBao AppRole Auth: https://openbao.org/docs/auth/approle
+- OpenBao Kubernetes Auth: https://openbao.org/docs/auth/kubernetes
+- OpenBao AWS IAM Auth: https://openbao.org/docs/auth/aws
+- OpenBao Policies: https://openbao.org/docs/concepts/policies
+- OpenBao Raft Snapshots: https://openbao.org/docs/commands/operator/raft/snapshot
+- OpenBao Agent Auto-Auth: https://openbao.org/docs/agent-and-proxy/agent/auto-auth
+- OpenBao Agent Caching: https://openbao.org/docs/agent-and-proxy/agent/caching
+- OpenBao Agent Templates: https://openbao.org/docs/agent-and-proxy/agent/template
+- OpenBao Agent Injector (Kubernetes): https://openbao.org/docs/platform/k8s/injector
+- OpenBao CSI Provider: https://openbao.org/docs/platform/k8s/csi
+- OpenBao Identity / Entities: https://openbao.org/docs/concepts/identity
+- OpenBao Token Metadata: https://openbao.org/docs/concepts/tokens#token-metadata
 - External Secrets Operator: https://external-secrets.io/latest/provider/hashicorp-vault/
-- GitHub Actions vault-action: https://github.com/hashicorp/vault-action
+- GitHub Actions openbao-action: https://github.com/openbao/vault-action
 - AWS credential_process: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
 - IMDSv2 Enforcement: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html
 - KMS Key Policies: https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html

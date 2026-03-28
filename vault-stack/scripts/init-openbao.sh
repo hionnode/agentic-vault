@@ -1,27 +1,27 @@
 #!/bin/bash
-# init-vault.sh — One-time Vault initialization
+# init-openbao.sh — One-time OpenBao initialization
 # Run manually via SSM after first boot. Do NOT run more than once.
 set -euo pipefail
 
-VAULT_ADDR="${VAULT_ADDR:-http://$(tailscale ip -4):8200}"
-export VAULT_ADDR
-echo "Using VAULT_ADDR=$VAULT_ADDR"
+BAO_ADDR="${BAO_ADDR:-http://$(tailscale ip -4):8200}"
+export BAO_ADDR
+echo "Using BAO_ADDR=$BAO_ADDR"
 
 # Check if already initialized
-if vault status -format=json 2>/dev/null | jq -e '.initialized == true' > /dev/null 2>&1; then
-  echo "ERROR: Vault is already initialized. Do not run this script again."
+if bao status -format=json 2>/dev/null | jq -e '.initialized == true' > /dev/null 2>&1; then
+  echo "ERROR: OpenBao is already initialized. Do not run this script again."
   exit 1
 fi
 
 echo ""
-echo "=== Initializing Vault ==="
+echo "=== Initializing OpenBao ==="
 echo ""
 echo "With KMS auto-unseal, these are RECOVERY keys (not unseal keys)."
-echo "Recovery keys are for emergency operations only — Vault auto-unseals via KMS."
+echo "Recovery keys are for emergency operations only — OpenBao auto-unseals via KMS."
 echo ""
 
 # Initialize with 5 recovery shares, 3 required threshold
-vault operator init -recovery-shares=5 -recovery-threshold=3
+bao operator init -recovery-shares=5 -recovery-threshold=3
 
 echo ""
 echo "========================================"
@@ -38,8 +38,8 @@ echo "No single point of compromise — 3 keys needed for recovery."
 echo ""
 echo "=== Next Steps ==="
 echo "1. Save the recovery keys to the locations above"
-echo "2. Log in with the root token: export VAULT_TOKEN=<root-token>"
+echo "2. Log in with the root token: export BAO_TOKEN=<root-token>"
 echo "3. Create your admin user/policy"
-echo "4. Enable audit logging: vault audit enable file file_path=/var/log/vault/audit.log"
+echo "4. Enable audit logging: bao audit enable file file_path=/var/log/openbao/audit.log"
 echo "5. Run teardown-root.sh to revoke the root token"
 echo "6. Run validate-init.sh to verify the deployment"

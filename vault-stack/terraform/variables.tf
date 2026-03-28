@@ -5,12 +5,12 @@ variable "aws_region" {
 }
 
 variable "vpc_id" {
-  description = "VPC ID for the Vault instance"
+  description = "VPC ID for the OpenBao instance"
   type        = string
 }
 
 variable "subnet_id" {
-  description = "Subnet ID for the Vault instance"
+  description = "Subnet ID for the OpenBao instance"
   type        = string
 }
 
@@ -25,14 +25,14 @@ variable "instance_type" {
   default     = "t4g.small"
 }
 
-variable "vault_version" {
-  description = "Vault binary version to install — check releases.hashicorp.com for latest"
+variable "openbao_version" {
+  description = "OpenBao binary version to install — check github.com/openbao/openbao/releases for latest"
   type        = string
-  default     = "1.18.2"
+  default     = "2.1.0"
 }
 
 variable "tailscale_authkey" {
-  description = "Tailscale auth key for the Vault instance (ephemeral, reusable recommended)"
+  description = "Tailscale auth key for the OpenBao instance (ephemeral, reusable recommended)"
   type        = string
   sensitive   = true
 }

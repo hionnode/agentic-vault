@@ -18,7 +18,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project   = "vault-stack"
+      Project   = "openbao-stack"
       ManagedBy = "terraform"
     }
   }
