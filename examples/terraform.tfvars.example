@@ -1,0 +1,30 @@
+# Agentic Vault — Terraform Variables
+# Copy this file to vault-stack/terraform/terraform.tfvars and fill in your values.
+# NEVER commit terraform.tfvars — it is gitignored.
+
+# Required: AWS region for all resources
+aws_region = "us-east-1"
+
+# Required: VPC networking (use your default VPC or an existing one)
+# Find these with:
+#   aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text
+#   aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" --query "Subnets[*].[SubnetId,AvailabilityZone]" --output table
+#   aws ec2 describe-route-tables --filters "Name=vpc-id,Values=<vpc-id>" "Name=association.main,Values=true" --query "RouteTables[0].RouteTableId" --output text
+vpc_id         = "vpc-xxxxxxxxx"
+subnet_id      = "subnet-xxxxxxxxx"
+route_table_id = "rtb-xxxxxxxxx"
+
+# Required: Email for CloudWatch alarm notifications
+alert_email = "you@example.com"
+
+# Optional: EC2 instance type (t4g.micro works for light use, t4g.small recommended)
+# instance_type = "t4g.small"
+
+# Optional: OpenBao version — check github.com/openbao/openbao/releases for latest
+# openbao_version = "2.1.0"
+
+# Optional: IAM role name used in bucket policies for admin access
+# admin_role_name = "admin"
+
+# IMPORTANT: Pass the Tailscale auth key via environment variable, not this file:
+#   export TF_VAR_tailscale_authkey="tskey-auth-..."

@@ -1,0 +1,34 @@
+# .vault-manifest.yaml — Minimal example for a single-environment project
+#
+# Place this file in your project repo root. The onboard-project.sh script
+# reads it to create all required OpenBao resources (policies, AppRoles, etc.).
+#
+# This example covers a solo developer working on a single project in staging.
+# For multi-client, multi-environment setups, see vault-manifest-full.yaml.
+
+project:
+  name: "my-app"
+  environments: ["staging"]
+
+secrets:
+  - name: "database-url"
+    description: "PostgreSQL connection string"
+    environments: ["staging"]
+    consumers: ["dev"]
+
+  - name: "api-key"
+    description: "Third-party API key"
+    environments: ["staging"]
+    consumers: ["dev"]
+
+aws_dynamic_credentials:
+  - role_suffix: "deploy"
+    description: "Scoped AWS credentials for infrastructure deployment"
+    environments: ["staging"]
+    consumers: ["dev"]
+    staging_ttl: "1h"
+
+consumers:
+  dev:
+    auth_method: "approle"
+    token_ttl: "2h"

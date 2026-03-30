@@ -1,0 +1,71 @@
+# .vault-manifest.yaml — Full example for a multi-client, multi-environment project
+#
+# Place this file in your project repo root. The onboard-project.sh script
+# reads it to create all required OpenBao resources: policies, AppRoles,
+# Kubernetes auth roles, AWS IAM auth roles, and dynamic credential roles.
+#
+# This example shows an agency managing a client platform across staging and
+# production, with multiple consumer types (local dev, CI, Kubernetes).
+
+project:
+  name: "clientA-platform"                 # Must match KV path under secret/projects/
+  environments: ["staging", "prod"]
+
+# Static secrets stored in KV v2 at secret/projects/<name>/<env>/
+secrets:
+  - name: "database-url"
+    description: "PostgreSQL connection string"
+    environments: ["staging", "prod"]      # Present in both environments
+    consumers: ["dev", "gha", "eks"]       # Who needs access to this secret
+
+  - name: "redis-url"
+    description: "Redis connection string"
+    environments: ["staging", "prod"]
+    consumers: ["dev", "gha", "eks"]
+
+  - name: "openai-api-key"
+    description: "OpenAI API key for AI features"
+    environments: ["staging", "prod"]
+    consumers: ["dev", "eks"]              # Not needed in CI
+
+  - name: "stripe-key"
+    description: "Stripe API key"
+    environments: ["staging", "prod"]
+    consumers: ["eks"]                     # Only the running app needs payment keys
+
+# Dynamic AWS credentials via the AWS secrets engine
+# Creates roles like: clientA-staging-deploy, clientA-prod-deploy
+aws_dynamic_credentials:
+  - role_suffix: "deploy"
+    description: "Scoped AWS credentials for infrastructure deployment"
+    environments: ["staging", "prod"]
+    consumers: ["dev", "gha"]
+    staging_ttl: "1h"                      # Longer TTL for iterative dev work
+    prod_ttl: "30m"                        # Shorter TTL for production (least privilege)
+
+# References to secrets shared across projects (e.g., org-wide tokens)
+shared_secrets:
+  - path: "shared/github-token"
+    consumers: ["dev"]
+  - path: "shared/dockerhub-creds"
+    consumers: ["gha", "eks"]
+
+# Consumer definitions — each gets its own auth method and token policy
+consumers:
+  dev:                                     # Local dev machine / Claude Code
+    auth_method: "approle"
+    token_ttl: "2h"
+
+  gha:                                     # GitHub Actions
+    auth_method: "approle"
+    token_ttl: "30m"
+
+  eks:                                     # EKS pods via Kubernetes auth
+    auth_method: "kubernetes"
+    auth_path: "kubernetes-eks"            # OpenBao auth mount path
+    service_account: "clientA-app"
+    namespace_template: "clientA-{environment}"  # Resolves to clientA-staging, clientA-prod
+
+  ecs:                                     # ECS tasks via AWS IAM auth
+    auth_method: "aws-iam"
+    iam_role_template: "arn:aws:iam::123456789012:role/clientA-{environment}-task-role"

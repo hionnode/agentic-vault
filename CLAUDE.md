@@ -1,3 +1,5 @@
+> This file provides project context for Claude Code sessions. If you're a human reader, start with [README.md](README.md).
+
 # Agentic Vault
 
 ## What This Is
