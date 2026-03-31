@@ -112,6 +112,7 @@ agentic-vault/
 | [Implementation Plan](implementation-plan.md) | Complete build plan with phases, code, and operational procedures |
 | [OpenBao AWS Handbook](docs/openbao-aws-handbook.md) | Architecture deep dive, security model, operational runbook, cost breakdown |
 | [Integration Patterns](docs/integration-patterns.md) | Auth methods, secret access patterns, multi-consumer integration, failure modes |
+| [OneCLI Integration](docs/onecli-integration.md) | Playbook for combining Agentic Vault with OneCLI's proxy-based credential injection |
 
 ## Cost
 

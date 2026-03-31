@@ -3039,6 +3039,7 @@ This project serves two audiences: the maintainer's own infrastructure needs, an
 | `docs/integration-patterns.md` | Auth patterns, secret access, multi-consumer integration | Developers integrating agents with OpenBao |
 | `implementation-plan.md` | Complete build plan with code and operational procedures | Contributors and deployers |
 | `CONTRIBUTING.md` | How to contribute, code style, security reporting | Contributors |
+| `docs/onecli-integration.md` | Playbook for combining Agentic Vault with OneCLI proxy layer | Operators wanting defense-in-depth |
 | `CLAUDE.md` | Project context for Claude Code sessions | Claude Code (internal) |
 
 ### 10.2 Examples
